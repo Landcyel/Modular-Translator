@@ -69,22 +69,21 @@ python APP.py
 }
 ```
 
-**`configs/translate/rules/lrc.json`**（标准 LRC 歌词）——识别时间戳、说话人标签与元数据行：
+**`configs/translate/rules/lrc.json`**（标准 LRC 歌词）——识别时间戳与说话人标签：
 
 ```json
 {
     "description": "标准 LRC 歌词规则…",
     "prefix": [
         {"regex": "(?:\\[\\d{1,3}:\\d{2}(?:[.:]\\d{1,3})?\\])+"},
-        {"regex": "<[A-Za-z_][A-Za-z0-9_.-]*>"},
-        {"regex": "\\[(?:ti|ar|al|by|re|ve|offset):[^\\]]*\\]\\s*"}
+        {"regex": "<[A-Za-z_][A-Za-z0-9_.-]*>"}
     ],
     "suffix": [{"regex": "$"}],
     "placeholder": []
 }
 ```
 
-- 时间戳：`[mm:ss.xx]`（支持一行多个连续时间戳）；说话人标签：`<S01>`；元数据行：`[ti:]/[ar:]/[al:]/[by:]/[offset:]` 整行保留不译，仅翻译行尾歌词文本。
+- 时间戳：`[mm:ss.xx]`（支持一行多个连续时间戳）；说话人标签：`<S01>`；仅翻译行尾歌词文本。
 
 **启用方式**：`configs/system/default.ini` 的 `[translate]` 段 `rule=` 选择规则文件（`无` = 不启用）；也可在翻译页的「规则」下拉选择。
 

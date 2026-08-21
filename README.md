@@ -4,19 +4,6 @@
 
 ![外观预览](app_preview.jpg)
 
-## 快速开始
-
-```bash
-# 1. 准备外部依赖（不入库，约 13GB，单独下载后解压到仓库根）
-#    dependencies/  ：模型权重、llama-server 二进制、torch 运行时、MOSS 源码
-#    characters/    ：角色语音资产（S1/S2 权重 + 参考音频）
-#    app_light/dependencies 与 app_light/characters 是指向仓库根同名目录的 junction
-
-# 2. 在已安装依赖的 venv 中启动
-cd app_light
-python APP.py
-```
-
 所有配置集中在 `app_light/configs/`，界面「设置」页提供基于 schema 的配置表单；本文档以下按「翻译 → 转写 → 语音合成」三块说明各参数含义。
 
 ---

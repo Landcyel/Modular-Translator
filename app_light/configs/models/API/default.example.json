@@ -1,5 +1,5 @@
 {
-    "_comment": "复制此文件为 default.json 并填入你的 API Key",
+    "_comment": "复制此文件为 default.json 并填入你的 API Key。注意：翻译 API 后端当前仅支持 OpenAI 兼容（OpenAI-compatible）格式，base_url 为 OpenAI 格式 Chat Completions 端点（自动补 /v1）。",
     "base_url": "https://api.deepseek.com",
     "api_key": "YOUR_API_KEY_HERE",
     "model": "deepseek-v4-pro",

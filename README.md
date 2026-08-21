@@ -162,6 +162,8 @@ python APP.py
 | `model` | `deepseek-v4-pro` | 模型 ID |
 | `timeout` | `120` | 请求超时（秒） |
 
+> **注意**：API 翻译后端**当前仅支持 OpenAI 兼容（OpenAI-compatible）格式**——`base_url` 需为 OpenAI 格式的 Chat Completions 端点（自动补 `/v1`），`api_key`/`model` 为对应服务的密钥与模型 ID。非 OpenAI 格式的接口（如原生 Anthropic/Google 等）暂不支持。
+
 **翻译参数（Llama）`configs/translate/args_llama/default.json`**
 
 | 键 | 默认 | 含义 |

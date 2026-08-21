@@ -285,13 +285,3 @@
 ## 免责声明
 
 本软件仅供学习与研究。模型权重与角色语音素材版权归各自权利人所有，请确保使用你拥有合法授权的数据。基于生成内容的使用后果由使用者自行承担。
-
----
-
-## English Overview
-
-A Windows desktop **Japanese → Simplified Chinese translation workstation**: audio transcription → translation (local llama.cpp/Sakura or OpenAI-compatible API) → GPT-SoVITS speech synthesis → LRC subtitle export.
-
-- **Rules** (`configs/translate/rules/*.json`): `prefix`/`suffix` mark line boundaries (literal or regex, longest-match first), `placeholder` protects immutable tokens as `<<<…>>>`, `skip` passes matched lines through untranslated, `recognize` optionally filters which lines get translated.
-- **Reference modes** (`ref_mode`): `default` = single reference audio + optional text; `aux` = emotion + character reference (tone/emotion compromise); `dual` = character-anchored timbre priority (both references required, 3–10s each).
-- All parameters are documented in the Chinese sections above (`configs/system/default.ini`, `models/llama`, `models/API`, `translate/*`, `models/moss`, `transcribe/*`, `models/gsv`, `tts/args`, `tts/roles`).

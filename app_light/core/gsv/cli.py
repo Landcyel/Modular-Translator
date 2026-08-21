@@ -1,6 +1,6 @@
-"""CLI 冒烟入口: python -m core.gsv.cli synth ...
+"""CLI smoke-test entry: python -m core.gsv.cli synth ...
 
-示例::
+Example::
 
     .venv/Scripts/python -m core.gsv.cli synth \\
         --text "你好，这是一段测试。" --text-lang zh \\

@@ -1,18 +1,19 @@
-"""翻译工作台页面 — UI 构建保留，功能实现已移除（重建待定）。
+"""Translate workbench page — UI building kept; functional implementation removed (rebuild pending).
 
-保留：
-- build() 三行布局与全部控件（视觉结构不变）
-- save_ui_state() / refresh()（layout.py 导航契约）
-- build_translate() 兼容包装
+Kept:
+- build()'s three-row layout and all controls (visual structure unchanged)
+- save_ui_state() / refresh() (layout.py navigation contract)
+- build_translate() compatibility wrapper
 
-移除：register_callbacks() 与其余服务/任务/提交/队列/回调功能实现
-（_start_service/_stop_service/_submit_translation/_update_service_status/_on_clear/
- _on_pause_toggle/_refresh_tasks/_on_service_change/_on_task_change 均为占位，
- 仅保留签名供 build() 控件回调绑定，方法体为空——对应按钮点击无响应属预期行为）。
-已恢复：后端选择（_on_backend_switch/_set_backend_style，Llama/API 二选一
-Switch 开关，仿 completed 页自动导出开关样式）与文件选择
-（_pick_file，含文本格式验证）。
-原始实现见 ui/pages/translate.py.bak。
+Removed: register_callbacks() and the remaining service/task/submit/queue/callback
+implementations (_start_service/_stop_service/_submit_translation/_update_service_status/
+_on_clear/_on_pause_toggle/_refresh_tasks/_on_service_change/_on_task_change are all
+placeholders; only their signatures remain for build()'s control callback bindings,
+method bodies are empty — button clicks doing nothing is expected behavior).
+Restored: backend selection (_on_backend_switch/_set_backend_style, an Llama/API
+two-way Switch, styled like the completed page's auto-export switch) and file selection
+(_pick_file, including text-format validation).
+Original implementation in ui/pages/translate.py.bak.
 """
 
 import flet as ft
@@ -33,23 +34,23 @@ from ui.widgets.config_picker import config_picker
 from ui.widgets.task_list import task_queue_panel
 
 
-# 文本文件尝试解码的编码顺序（覆盖中文与日文常见文本编码）
+# Encoding order tried when decoding text files (covers common Chinese and Japanese text encodings)
 _TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "cp932", "shift_jis", "gbk")
 
 
 def _read_text_file(path: Path) -> str | None:
-    """读取文件为文本；非文本格式（二进制 / 无法解码）返回 None。
+    """Read a file as text; returns None for non-text formats (binary / undecodable).
 
-    返回文本统一为 ``\\n`` 换行（``\\r\\n``/``\\r`` → ``\\n``）：预览进
-    TextField 与后续写 temp 文件都以纯 ``\\n`` 传递，避免 Windows 下
-    ``write_text`` 默认 newline=None 把 ``\\r\\n`` 写成 ``\\r\\r\\n`` 双重
-    回车（executor 读回时每行多一个空行）。
+    The returned text uses ``\\n`` newlines uniformly (``\\r\\n``/``\\r`` → ``\\n``): both the
+    preview into the TextField and the later temp-file write pass plain ``\\n``, avoiding
+    Windows ``write_text``'s default newline=None turning ``\\r\\n`` into a double ``\\r\\r\\n``
+    (an extra blank line per row when the executor reads it back).
     """
     try:
         data = path.read_bytes()
     except OSError:
         return None
-    if b"\x00" in data:          # NUL 字节 → 二进制特征，拒绝
+    if b"\x00" in data:          # NUL byte → binary signature, reject
         return None
     for enc in _TEXT_ENCODINGS:
         try:
@@ -60,45 +61,45 @@ def _read_text_file(path: Path) -> str | None:
 
 
 def build_translate(page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
-    """兼容包装 — 创建 TranslatePage 实例并构建 UI。"""
+    """Compatibility wrapper — create a TranslatePage instance and build the UI."""
     return TranslatePage(page, facade, file_picker).build()
 
 
 class TranslatePage:
-    """翻译工作台页面实例 — 长期持有状态，避免导航切换时丢失。"""
+    """Translate workbench page instance — holds state long-term so it survives navigation switches."""
 
     def __init__(self, page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
         self.page = page
         self.facade = facade
         self.file_picker = file_picker
 
-        # ── 服务状态 ──
+        # ── Service state ──
         self.is_online = False
         self.is_loading = False
-        self.is_paused = True  # 任务队列初始暂停：仅服务加载后才能开启
+        self.is_paused = True  # task queue starts paused: only enabled once the service is loaded
         self.current_backend = "llama"  # "llama" | "api"
-        self.service_device = None  # 实际工作设备（cuda/cpu/api），状态栏着色显示
+        self.service_device = None  # actual working device (cuda/cpu/api), colored in the status bar
 
-        # ── 配置选择缓存 ──
+        # ── Config picker cache ──
         self.selected_server = None
         self.selected_prompts = None
         self.selected_args = None
         self.selected_rule = None
         self.selected_glossary = None
 
-        # ── 翻译默认配置（configs/defaults/translate/default.json）──
+        # ── Translate default config (configs/defaults/translate/default.json) ──
         self._default_cfg: dict = {}
         self._load_default_config()
 
-        # ── 输入状态 ──
+        # ── Input state ──
         self.input_path = None
         self.input_value = ""
 
-        # ── 队列状态缓存 ──
+        # ── Queue state cache ──
         self.current_task = None
         self.waiting_tasks = []
-        # 已入队文件的绝对路径集合（批量导入去重，Windows 大小写不敏感）
-        self._queued_paths = set()  # 兼容旧版去重（已废弃，保留字段避免外部引用报错）
+        # Absolute paths of already-enqueued files (dedup for batch import; case-insensitive on Windows)
+        self._queued_paths = set()  # legacy dedup compat (deprecated; field kept to avoid external-reference errors)
 
         # ── Refs ──
         self.status_dot = ft.Ref[ft.Container]()
@@ -107,37 +108,35 @@ class TranslatePage:
         self.stop_btn = ft.Ref[ft.TextButton]()
         self.input_text = ft.Ref[ft.TextField]()
         self.task_container = ft.Ref[ft.Container]()
-        self.backend_switch = ft.Ref[ft.Switch]()      # 后端选择开关（关=Llama / 开=API）
-        self.backend_name_label = ft.Ref[ft.Text]()    # 开关旁动态后端名（Llama/API）
+        self.backend_switch = ft.Ref[ft.Switch]()      # backend select switch (off=Llama / on=API)
+        self.backend_name_label = ft.Ref[ft.Text]()    # dynamic backend name beside the switch (Llama/API)
 
-        # ── 配置选择器 getter（build 时赋值）──
+        # ── Config picker getters (assigned at build) ──
         self._get_server = None
         self._get_prompts = None
         self._get_args = None
         self._get_rule = None
         self._get_glossary = None
 
-        # ── 服务配置下拉的 config_type 切换器（build 时赋值，后端切换调用）──
+        # ── Service-config dropdown config_type switcher (assigned at build; called on backend switch) ──
         self._set_server_ctype = None
-        # ── 翻译参数下拉的 config_type 切换器（build 时赋值，后端切换调用）──
+        # ── Translation-args dropdown config_type switcher (assigned at build; called on backend switch) ──
         self._set_args_ctype = None
 
-        # ── UI sink 接线（后端推送 → update_service_status/update_tasks）──
-        # 注册 name = current_backend（服务注册 key：'llama'/'api'），后端切换时重新注册
+        # ── UI sink wiring (backend push → update_service_status/update_tasks) ──
+        # Registered under name = current_backend (service key: 'llama'/'api'); re-registered on backend switch
         self._sink = None
         if self.facade is not None and hasattr(self.facade, "register_ui_sink"):
             self._sink = PageUiSink(page, self)
             self.facade.register_ui_sink(self.current_backend, self._sink)
 
-    # ════════════════════════════════════════════════════
-    #  公开接口
-    # ════════════════════════════════════════════════════
+    # ── Public interface ──
 
     def update_service_status(self, online: bool, loading: bool = False, device: str | None = None):
-        """后端推送：更新服务状态（重赋值 + 刷新状态点/标签/启停按钮）。
+        """Backend push: update the service status (reassign + refresh status dot/label/start-stop buttons).
 
-        队列开启联动（仅服务状态变化时）：停止/加载中 → 暂停；加载成功 → 开启；
-        同状态推送（如 refresh）不覆盖用户手动暂停。
+        Queue-enable linkage (only when the service status changes): stopped/loading → paused;
+        loaded successfully → enabled; same-status pushes (e.g. refresh) do not override a user's manual pause.
         """
         was_online = self.is_online
         self.is_online = bool(online)
@@ -153,15 +152,15 @@ class TranslatePage:
             self._rebuild_task_panel()
 
     def update_tasks(self, current, waiting):
-        """后端推送：重赋值任务缓存并重建队列面板（已完成任务由 CompletedPage 管理）。"""
+        """Backend push: reassign the task cache and rebuild the queue panel (completed tasks are managed by CompletedPage)."""
         self.current_task = current
         self.waiting_tasks = waiting or []
         self._rebuild_task_panel()
 
     def build(self) -> ft.Control:
-        """构建/重建翻译页面 UI（视觉结构原样保留）。"""
+        """Build/rebuild the translate page UI (visual structure kept as-is)."""
 
-        # ── 配置选择器（使用缓存的初始值）──
+        # ── Config pickers (using cached initial values) ──
         prompts_picker, self._get_prompts = config_picker(
             "提示词", [], config_type="prompts", width=Layout.PICKER_WIDTH_SM,
             value=self.selected_prompts,
@@ -180,8 +179,8 @@ class TranslatePage:
             value=self.selected_glossary,
         )
 
-        # ── 后端选择开关（Switch 在上，后端名文字在下；无「后端」标签）──
-        # 关 = Llama（本地默认后端），开 = API（远程）；切换经 _on_backend_switch。
+        # ── Backend select switch (Switch on top, backend name text below; no "Backend" label) ──
+        # Off = Llama (local default backend), On = API (remote); switching goes through _on_backend_switch.
         backend_btns = ft.Column([
             ft.Switch(
                 ref=self.backend_switch,
@@ -193,20 +192,20 @@ class TranslatePage:
                     weight=ft.FontWeight.W_600, color=Palette.PRIMARY),
         ], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
 
-        # ── 服务配置 Dropdown（config_type 默认 llama，与 current_backend 一致；
-        #    由 set_config_type 在切换后端时切换目标目录）
-        #    宽度与其它配置选择控件一致（PICKER_WIDTH_SM）──
+        # ── Service config Dropdown (config_type defaults to llama, matching current_backend;
+        #    set_config_type switches the target directory on backend switch)
+        #    width matches the other config pickers (PICKER_WIDTH_SM) ──
         server_picker, self._get_server = config_picker(
             "服务配置", [], config_type="llama", width=Layout.PICKER_WIDTH_SM,
             value=self.selected_server,
         )
         self._set_server_ctype = self._get_server.set_config_type
 
-        # ── 服务管理栏：两行共用 12 列网格（ResponsiveRow），同索引控件
-        #    左边缘水平对齐——第一行第 2 个「服务配置」与第二行第 2 个
-        #    「翻译参数」对齐；merge_backend=True：后端选择（Switch+后端名）
-        #    与启动/停止按钮组合并为行尾一个复合组件；
-        #    第二行 extra_items：提示词/翻译参数/规则/术语表 ──
+        # ── Service management bar: both rows share the 12-col grid (ResponsiveRow), controls at
+        #    the same index are left-aligned horizontally — the 2nd control "Service Config" in
+        #    row 1 aligns with the 2nd "Translation Args" in row 2; merge_backend=True: the
+        #    backend selector (Switch + backend name) and start/stop buttons merge into one
+        #    trailing composite; row 2 extra_items: prompts/translation args/rules/glossary ──
         service_bar = service_management_bar(
             service_type="translate",
             status_dot_ref=self.status_dot,
@@ -218,12 +217,12 @@ class TranslatePage:
             extra_items=[prompts_picker, args_picker, rule_picker, glossary_picker],
             on_start=self._start_service,
             on_stop=self._stop_service,
-            merge_backend=True,           # 后端选择 + 启停按钮组合并为行尾复合组件
-            row1_cols=(3, 3, 6),          # 状态 / 服务配置 / 后端+启停
-            row2_cols=(3, 3, 3, 3),       # 提示词 / 翻译参数 / 规则 / 术语表
+            merge_backend=True,           # backend selector + start/stop group merged into one trailing composite
+            row1_cols=(3, 3, 6),          # status / service config / backend+start-stop
+            row2_cols=(3, 3, 3, 3),       # prompts / translation args / rules / glossary
         )
 
-        # ── 输入区 ──
+        # ── Input area ──
         input_area = ft.TextField(
             ref=self.input_text,
             hint_text="输入待翻译的日文文本，或点击下方按钮加载文件...",
@@ -262,7 +261,7 @@ class TranslatePage:
 
         input_panel = ft.Container(
             content=ft.Column([
-                # 选择文件按钮位于「源文本」标题行最右侧对齐
+                # the pick-file button is right-aligned at the end of the "Source Text" title row
                 panel_header("源文本",
                     trailing=bordered_button(
                         "选择文件", ft.Icons.FILE_OPEN,
@@ -280,11 +279,11 @@ class TranslatePage:
             expand=3,
         )
 
-        # ── 任务队列 ──
+        # ── Task queue ──
         task_panel = ft.Container(
             ref=self.task_container,
             content=task_queue_panel(
-                # 切页重建时从实例缓存渲染（与 _rebuild_task_panel 一致），避免任务丢失
+                # render from the instance cache on page-switch rebuild (consistent with _rebuild_task_panel), avoiding task loss
                 current_task=self.current_task,
                 waiting_tasks=self.waiting_tasks,
                 callbacks={
@@ -301,13 +300,15 @@ class TranslatePage:
             expand=2,
         )
 
-        # ── 工作区（宽屏双栏；窄屏纵向排列，保留页面滚动）──
-        # 宽屏 workspace 不再固定高度：expand 填满内容区剩余高度，
-        # 保证源文本/任务队列面板底边与内容区底边对齐、完整显示。
+        # ── Workspace (two columns on wide screens; stacked vertically on narrow screens) ──
+        # Wide-screen workspace no longer has a fixed height: expand fills the content
+        # area's remaining height so the source-text/task-queue panel bottoms align with
+        # the content-area bottom and display fully.
         is_narrow = self.page.width > 0 and self.page.width < Layout.DESKTOP_MIN_WIDTH
         workspace = (
-            # 窄屏同样不滚动：scroll 容器内 flex 子项高度塌缩(不显示)，
-            # 面板内部(task_rows/输入框)已有滚动，外层用有界 flex 分配
+            # Narrow screens likewise do not scroll: flex children collapse to 0 height
+            # inside a scroll container (not shown); panels already scroll internally
+            # (task_rows/input field), so the outer layer uses bounded flex allocation
             ft.Column([
                 input_panel,
                 ft.Container(height=Layout.COLUMN_SPACING),
@@ -321,8 +322,9 @@ class TranslatePage:
             ], expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
         )
 
-        # 根列不滚动：flet 0.86.2 的 scroll 容器(Flutter ListView)主轴无界，
-        # 内部 expand 子项高度塌缩为 0 导致组件不显示；窗口已固定，无需整页滚动。
+        # The root column does not scroll: in flet 0.86.2 a scroll container (Flutter
+        # ListView) has an unbounded main axis, so inner expand children collapse to 0
+        # height and are not shown; the window is fixed, so no full-page scrolling is needed.
         return ft.Column([
             service_bar,
             ft.Container(height=Layout.SECTION_GAP),
@@ -331,7 +333,7 @@ class TranslatePage:
            horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def save_ui_state(self) -> None:
-        """离开页面前从控件 refs 同步状态到实例属性。"""
+        """Sync state from control refs to instance attributes before leaving the page."""
         if self.input_text.current:
             self.input_value = self.input_text.current.value or ""
         if self._get_server:
@@ -346,7 +348,7 @@ class TranslatePage:
             self.selected_glossary = self._get_glossary()
 
     def refresh(self) -> None:
-        """导航切回/提交/启停后的兜底：从后端拉取最新快照 → update_* 渲染。"""
+        """Fallback after nav-back/submit/start-stop: pull the latest snapshots from the backend → render via update_*."""
         if self.facade:
             try:
                 s = self.facade.get_service_status(self.current_backend)
@@ -358,15 +360,15 @@ class TranslatePage:
         self._refresh_tasks()
 
     def build_translation_requests(self, source) -> list:
-        """将输入打包为 TranslationRequest 列表（统一返回 list）。
+        """Package the input into a list of TranslationRequests (always returns a list).
 
-        - str（文本）→ 写入 temp/input_{年月日时分秒}.txt 作 file_path
-        - Path → 直接用该文件作 file_path
-        - list[Path] → 逐个生成
+        - str (text) → written to temp/input_{YYYYMMDDHHMMSS}.txt as the file_path
+        - Path → used directly as the file_path
+        - list[Path] → generated one per item
 
-        task_type 取 self.current_backend（'llama'/'api'，前端以 backend 值为
-        服务单元名）；configs 为配置选择器读取的路径字典（translate_config /
-        prompts / glossary / rule，glossary 未选时保留 None 键）。
+        task_type is self.current_backend ('llama'/'api' — the frontend uses the backend value as
+        the service unit name); configs is the path dict read from the config pickers
+        (translate_config / prompts / glossary / rule; glossary keeps a None key when unselected).
         """
         configs = {
             "translate_config": self._get_args() if self._get_args else None,
@@ -387,24 +389,22 @@ class TranslatePage:
             return [_make(Path(p), Path(p).name) for p in source]
         if isinstance(source, Path):
             return [_make(source, source.name)]
-        # str 文本 → 临时文件 temp/input_{年月日时分秒}.txt
-        # 必须 newline="\n":Windows 上 write_text 默认 newline=None 会把 \n 转成
-        # \r\n,若 source 本身是 \r\n(如从文件预览进 TextField),会写成 \r\r\n
-        # 双重回车,executor 读回时 universal newline 解析为 2 个换行 → 每行后
-        # 多一个空行(见 _read_text_file 的换行归一化)。这里统一写 \n,交由
-        # 读取方(read_text universal newline)归一化。
+        # str text → temp file temp/input_{YYYYMMDDHHMMSS}.txt
+        # Must use newline="\n": on Windows write_text's default newline=None would turn \n
+        # into \r\n; if source itself is \r\n (e.g. from a file previewed into the TextField),
+        # it becomes a double \r\r\n, which universal-newline parsing reads back as 2 newlines
+        # → an extra blank line per row (see _read_text_file's newline normalization). Here we
+        # write \n uniformly and let the reader (read_text universal newline) normalize.
         tmp_dir = Path("temp")
         tmp_dir.mkdir(parents=True, exist_ok=True)
         tmp = tmp_dir / f"input_{time.strftime('%Y%m%d%H%M%S')}.txt"
         tmp.write_text(str(source), encoding="utf-8", newline="\n")
         return [_make(tmp, tmp.name)]
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — UI 样式（功能已移除，占位保留签名）
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — UI styles (functionality removed; placeholder signatures kept) ──
 
     def _set_backend_style(self):
-        """根据 current_backend 同步后端选择开关与动态标签。"""
+        """Sync the backend select switch and dynamic label from current_backend."""
         switch = self.backend_switch.current
         if switch is not None and switch.value != (self.current_backend == "api"):
             switch.value = (self.current_backend == "api")
@@ -421,11 +421,12 @@ class TranslatePage:
                 pass
 
     def _load_default_config(self) -> None:
-        """打开软件时读取"翻译默认配置"（configs/system/default.ini [translate]）。
+        """Read the "translate default config" at app startup (configs/system/default.ini [translate]).
 
-        初始化各配置选择器的默认选中项（llama 后端）；api 后端默认在切换后端时
-        经 config_picker.set_value 应用（api_server / translate_args_api）。
-        文件缺失或解析失败时保持 None（下拉回退首项）。
+        Initializes the default selections of each config picker (llama backend); the api backend
+        defaults are applied via config_picker.set_value when switching backends
+        (api_server / translate_args_api). Keeps None when the file is missing or fails to parse
+        (dropdowns fall back to the first option).
         """
         try:
             data = load_section("translate")
@@ -439,50 +440,47 @@ class TranslatePage:
         self.selected_glossary = data.get("glossary") or None
 
     def _on_backend_switch(self, e):
-        """后端选择开关切换：关=Llama（本地默认），开=API（远程）。
+        """Backend select switch toggle: off=Llama (local default), on=API (remote).
 
-        与原 _on_llama_click/_on_api_click 等价：联动服务配置下拉
-        （llama → configs/models/llama；api → configs/models/API）、
-        翻译参数下拉（translate_args / translate_args_api）、样式刷新
-        与 sink 重注册。
+        Equivalent to the original _on_llama_click/_on_api_click: links the service config dropdown
+        (llama → configs/models/llama; api → configs/models/API), the translation args dropdown
+        (translate_args / translate_args_api), style refresh, and sink re-registration.
         """
         self.current_backend = "api" if e.control.value else "llama"
         if self.current_backend == "llama":
             if self._set_server_ctype:
-                self._set_server_ctype("llama")   # 服务配置下拉切换到 configs/models/llama
+                self._set_server_ctype("llama")   # switch the service config dropdown to configs/models/llama
                 if self._get_server and self._default_cfg.get("llama_server"):
                     self._get_server.set_value(self._default_cfg["llama_server"])
             if self._set_args_ctype:
-                self._set_args_ctype("translate_args")   # 翻译参数下拉切换到 Llama 参数目录
+                self._set_args_ctype("translate_args")   # switch the translation args dropdown to the Llama args dir
                 if self._get_args and self._default_cfg.get("translate_args"):
                     self._get_args.set_value(self._default_cfg["translate_args"])
         else:
             if self._set_server_ctype:
-                self._set_server_ctype("api")     # 服务配置下拉切换到 configs/models/API
+                self._set_server_ctype("api")     # switch the service config dropdown to configs/models/API
                 if self._get_server and self._default_cfg.get("api_server"):
                     self._get_server.set_value(self._default_cfg["api_server"])
             if self._set_args_ctype:
-                self._set_args_ctype("translate_args_api")   # 翻译参数下拉切换到 API 参数目录
+                self._set_args_ctype("translate_args_api")   # switch the translation args dropdown to the API args dir
                 if self._get_args and self._default_cfg.get("translate_args_api"):
                     self._get_args.set_value(self._default_cfg["translate_args_api"])
         self._set_backend_style()
         self.service_device = self._current_device()
-        self._update_service_status()   # 状态文字同步为当前后端（Llama/API × 未加载/已加载/正在加载）
+        self._update_service_status()   # sync status text to the current backend (Llama/API × not-loaded/loaded/loading)
         self._re_register_sink()
 
     def _re_register_sink(self):
-        """后端切换后：sink 重新注册到当前服务的 key（'llama'/'api'）。"""
+        """After a backend switch: re-register the sink to the current service's key ('llama'/'api')."""
         if self._sink is not None and self.facade is not None \
                 and hasattr(self.facade, "register_ui_sink"):
             self.facade.register_ui_sink(self.current_backend, self._sink)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 服务状态与任务（功能已移除，占位保留签名）
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — service state and tasks (functionality removed; placeholder signatures kept) ──
 
     @staticmethod
     def _safe_update(ctrl):
-        """控件未挂载（flet 0.86.2 首帧/重建时序）时静默跳过 update。"""
+        """Silently skip update when the control is not mounted (flet 0.86.2 first-frame/rebuild timing)."""
         if ctrl is None:
             return
         try:
@@ -491,7 +489,7 @@ class TranslatePage:
             pass
 
     def _update_service_status(self):
-        """刷新状态点/标签/启停按钮。"""
+        """Refresh the status dot/label/start-stop buttons."""
         dot = self.status_dot.current
         if dot is not None:
             dot.bgcolor = (
@@ -518,7 +516,7 @@ class TranslatePage:
 
     @staticmethod
     def _device_display(device: str | None) -> tuple[str | None, str | None]:
-        """返回 (显示文本, 颜色)；CUDA 绿 / CPU 橙 / API 蓝，未知返回 None。"""
+        """Return (display text, color); CUDA green / CPU orange / API blue; unknown returns None."""
         if not device:
             return None, None
         dv = str(device).lower()
@@ -529,7 +527,7 @@ class TranslatePage:
         return dv.upper(), Palette.PRIMARY
 
     def _apply_device_span(self, label: ft.Text) -> None:
-        """把实际工作设备作为彩色 TextSpan 追加到状态文字。"""
+        """Append the actual working device to the status text as a colored TextSpan."""
         text, color = self._device_display(self.service_device)
         if text and color and self.is_online:
             label.spans = [
@@ -542,7 +540,7 @@ class TranslatePage:
             label.spans = []
 
     def _current_device(self) -> str | None:
-        """从 facade 查询当前后端实际工作设备（无 facade 时返回 None）。"""
+        """Query the current backend's actual working device from the facade (None when no facade)."""
         if self.facade is not None and hasattr(self.facade, "get_service_device"):
             try:
                 return self.facade.get_service_device(self.current_backend)
@@ -551,15 +549,15 @@ class TranslatePage:
         return None
 
     def _on_move_up(self, task_id):
-        """上移等待任务。"""
+        """Move a waiting task up."""
         self._move_waiting(task_id, -1)
 
     def _on_move_down(self, task_id):
-        """下移等待任务。"""
+        """Move a waiting task down."""
         self._move_waiting(task_id, 1)
 
     def _move_waiting(self, task_id, delta):
-        """本地缓存交换位置 + 同步 facade（core 队列为最终秩序）。"""
+        """Swap positions in the local cache + sync with the facade (the core queue is the source of truth)."""
         idx = next((i for i, t in enumerate(self.waiting_tasks)
                     if isinstance(t, dict) and t.get("id") == task_id), None)
         if idx is None:
@@ -577,12 +575,12 @@ class TranslatePage:
         self._rebuild_task_panel()
 
     def _on_cancel_task(self, task_id):
-        """取消任务（本地缓存移除 + 同步 facade）。
+        """Cancel a task (remove from the local cache + sync with the facade).
 
-        当前任务（current_task）与等待任务（waiting_tasks）都需同步：
-        facade.cancel_task 必须总是调用（core 对 running 任务发取消信号、
-        对 pending 任务移除）——此前仅当 waiting_tasks 变化才调用，
-        导致当前任务无法取消。
+        Both the current task (current_task) and waiting tasks (waiting_tasks) must be synced:
+        facade.cancel_task must always be called (core sends a cancel signal to a running task
+        and removes a pending one) — previously it was only called when waiting_tasks changed,
+        so the current task could never be cancelled.
         """
         self.waiting_tasks = [t for t in self.waiting_tasks
                               if not (isinstance(t, dict) and t.get("id") == task_id)]
@@ -596,7 +594,7 @@ class TranslatePage:
         self._rebuild_task_panel()
 
     def _on_clear(self):
-        """清空等待任务（保留当前运行任务与已完成任务）。"""
+        """Clear waiting tasks (keep the currently running and completed tasks)."""
         name = self.current_backend
         if self.facade is not None:
             try:
@@ -611,7 +609,7 @@ class TranslatePage:
             )
 
     def _on_pause_toggle(self):
-        """暂停/恢复队列：仅服务加载后可开启；暂停始终允许（服务未加载时本就暂停）。"""
+        """Pause/resume the queue: enable only after the service loads; pausing is always allowed (it is already paused when the service is not loaded)."""
         if self.is_paused and not self.is_online:
             msg = "需先加载服务才能开启队列"
             log.record("warn", f"[翻译] {msg}")
@@ -631,7 +629,7 @@ class TranslatePage:
         self._rebuild_task_panel()
 
     def _refresh_tasks(self):
-        """从后端拉取当前/等待任务并渲染（导航切回兜底；推送接线后仍保留）。"""
+        """Pull current/waiting tasks from the backend and render (fallback when navigating back; kept even after the push is wired)."""
         if self.facade is None:
             self.current_task = None
             self.waiting_tasks = []
@@ -649,7 +647,7 @@ class TranslatePage:
 
     @staticmethod
     def _snap_to_dict(snap) -> dict:
-        """将 TaskSnapshot 投影为 dict（与 AppFacade._project 字段一致，供本地缓存操作）。"""
+        """Project a TaskSnapshot to a dict (fields match AppFacade._project; used for local-cache operations)."""
         name = snap.file_name or ""
         return {
             "id": snap.id,
@@ -662,21 +660,19 @@ class TranslatePage:
             "error": snap.error,
         }
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 服务操作（功能已移除，占位保留签名）
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — service operations (functionality removed; placeholder signatures kept) ──
 
     async def _start_service(self, e):
-        """启动翻译服务（current_backend 即注册服务 key；config_path 用服务配置选择器）。"""
+        """Start the translation service (current_backend is the registered service key; config_path uses the service config picker)."""
         if self.facade is None:
             log.record("warn", "[翻译] facade 未接线")
             return
         name = self.current_backend
         config_path = self._get_server() if self._get_server else None
         try:
-            # core 启动为同步阻塞（llama 拉起/模型加载）→ 线程池避免阻塞事件循环
+            # core startup is synchronous/blocking (llama launch / model load) → thread pool avoids blocking the event loop
             await asyncio.to_thread(self.facade.start_service, name, None, config_path)
-            # 主动刷新按钮状态（推送兜底：即使后端未回调也即时更新）
+            # proactively refresh the button state (push fallback: update immediately even if the backend doesn't callback)
             self.service_device = self._current_device()
             self.update_service_status(True, False, self.service_device)
         except Exception as ex:
@@ -685,23 +681,21 @@ class TranslatePage:
             self.update_service_status(False, False)
 
     async def _stop_service(self, e):
-        """停止翻译服务（core 内先取消当前任务；完成后主动刷新按钮状态）。"""
+        """Stop the translation service (core cancels the current task first; proactively refresh button state when done)."""
         if self.facade is None:
             return
         try:
             await asyncio.to_thread(self.facade.stop_service, self.current_backend)
-            # 主动刷新按钮状态（推送兜底）
+            # proactively refresh the button state (push fallback)
             self.service_device = None
             self.update_service_status(False, False)
         except Exception as ex:
             log.record("error", f"[翻译] 停止失败: {ex}")
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 文件选择与提交（功能已移除，占位保留签名）
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — file selection and submission (functionality removed; placeholder signatures kept) ──
 
     async def _pick_file(self, e):
-        """选择导入方式 — AlertDialog 分流：选择文件（可多选、后缀不限）/ 选择文件夹。"""
+        """Choose the import method — AlertDialog branches: pick files (multi-select, any suffix) / pick a folder."""
         if self.file_picker is None or self.page is None:
             return
         dlg = ft.AlertDialog(
@@ -724,14 +718,14 @@ class TranslatePage:
             actions=[ft.TextButton("取消", on_click=self._close_import_dialog)],
         )
         self._import_dialog = dlg
-        # flet 0.86.2：Page 无 dialog 属性，必须用 show_dialog()（加入对话框栈并渲染）
+        # flet 0.86.2: Page has no dialog attribute; must use show_dialog() (pushes onto the dialog stack and renders)
         self.page.show_dialog(dlg)
 
     def _close_import_dialog(self, e=None):
         dlg = getattr(self, "_import_dialog", None)
         if dlg is not None:
             dlg.open = False
-            self.page.update()  # 与 settings 页 _close_dlg 模式一致（show_dialog 栈内关闭）
+            self.page.update()  # consistent with the settings page's _close_dlg pattern (closing inside the show_dialog stack)
 
     async def _on_choose_files(self, e):
         self._close_import_dialog()
@@ -755,8 +749,8 @@ class TranslatePage:
         if self.file_picker is None:
             return
         try:
-            # flet 0.86.2：文件夹选择 API 为 get_directory_path（直接返回路径字符串），
-            # pick_directory 已移除
+            # flet 0.86.2: the folder-picking API is get_directory_path (returns a path
+            # string directly); pick_directory was removed
             result = await self.file_picker.get_directory_path(dialog_title="选择待导入文件夹")
         except Exception as ex:
             log.record("error", f"[翻译] 选择文件夹失败: {ex}")
@@ -773,7 +767,7 @@ class TranslatePage:
         await self._process_selected(paths)
 
     def _import_directory(self, path: Path) -> list:
-        """扫描文件夹顶层：仅 is_file、不递归子目录、按文件名排序。"""
+        """Scan the folder's top level: only is_file, no recursion into subdirectories, sorted by file name."""
         try:
             entries = [p for p in path.iterdir() if p.is_file()]
         except OSError as ex:
@@ -782,7 +776,7 @@ class TranslatePage:
         return sorted(entries, key=lambda p: p.name.lower())
 
     async def _process_selected(self, paths: list):
-        """分发：单文件 → 验证后预览填充输入区；多文件/文件夹 → 批量入队。"""
+        """Dispatch: single file → validate then fill the input area for preview; multiple files/folder → batch enqueue."""
         paths = [p for p in paths if p]
         if len(paths) == 1:
             text = _read_text_file(paths[0])
@@ -795,7 +789,7 @@ class TranslatePage:
             if self.input_text.current:
                 self.input_text.current.value = text
                 self.input_text.current.update()
-                # 记录源文件（供提交文本时沿用文件名；提交成功后重置）
+                # remember the source file (so the text submission reuses its name; reset after successful submit)
                 try:
                     self.input_path = paths[0].resolve()
                 except OSError:
@@ -804,10 +798,10 @@ class TranslatePage:
         self._enqueue_translations(paths)
 
     def _enqueue_translations(self, paths: list):
-        """批量校验并入队：后缀不限、NUL/解码失败拒绝且不中断。
+        """Validate in batch and enqueue: no suffix restriction; NUL/decode failures are rejected without interrupting the rest.
 
-        允许同一文件多次添加（每次导入都是独立任务）；
-        文本任务（_submit_translation）不经过此路径。
+        The same file may be added multiple times (each import is an independent task);
+        text submissions (_submit_translation) do not go through this path.
         """
         ok_paths, rejected = [], []
         for p in paths:
@@ -835,12 +829,12 @@ class TranslatePage:
         self._enqueue_requests(reqs)
 
     def _enqueue_requests(self, reqs: list):
-        """统一入队：facade 提交（存在时）+ 本地缓存 + 提示。
+        """Unified enqueue: facade submit (when present) + local cache + snackbar.
 
-        文件批量导入与文本提交共用；文本任务不经过 _queued_paths 去重
-        （每次提交为独立新任务）。
-        - facade 已接线：队列展示由 core _emit → update_tasks 推送接管（不手动重建）
-        - facade 未接线：本地缓存 + 手动重建兜底
+        Shared by file batch import and text submission; text tasks skip the _queued_paths dedup
+        (each submission is an independent new task).
+        - facade wired: queue display is taken over by the core _emit → update_tasks push (no manual rebuild)
+        - facade not wired: local cache + manual rebuild fallback
         """
         has_facade = self.facade is not None and hasattr(self.facade, "submit_task")
         submitted = 0
@@ -852,7 +846,7 @@ class TranslatePage:
                 except Exception as ex:
                     log.record("error", f"[翻译] 提交失败: {ex}")
         else:
-            submitted = len(reqs)  # facade 未接线：仅本地缓存展示
+            submitted = len(reqs)  # facade not wired: local-cache display only
             for r in reqs:
                 name = getattr(r, "file_name", None) or ""
                 self.waiting_tasks.append({
@@ -865,14 +859,14 @@ class TranslatePage:
                 })
             self._rebuild_task_panel()
         if self.page:
-            # flet 0.86.2：SnackBar 为 DialogControl，经 show_dialog 显示（show_snack_bar 已移除）
+            # flet 0.86.2: SnackBar is a DialogControl, shown via show_dialog (show_snack_bar was removed)
             self.page.show_dialog(
                 ft.SnackBar(ft.Text(f"已加入队列 {submitted} 个任务"), bgcolor=Palette.SUCCESS)
             )
         return submitted
 
     def _rebuild_task_panel(self):
-        """重建任务队列面板（本地缓存驱动；后端 update_tasks 接线后由推送接管）。"""
+        """Rebuild the task queue panel (driven by the local cache; the update_tasks push takes over once wired)."""
         if not self.task_container.current:
             return
         self.task_container.current.content = task_queue_panel(
@@ -892,7 +886,7 @@ class TranslatePage:
         self._safe_update(self.task_container.current)
 
     def _submit_translation(self, e):
-        """提交输入区文本为翻译任务（写入 temp/input_{时间戳}.txt 后统一入队）。"""
+        """Submit the input-area text as a translation task (written to temp/input_{timestamp}.txt then enqueued uniformly)."""
         text = self.input_text.current.value if self.input_text.current else self.input_value
         if not text.strip():
             msg = "请输入待翻译文本"
@@ -907,7 +901,7 @@ class TranslatePage:
             return
         if not reqs:
             return
-        # 预览读取的文本：任务文件名沿用源文件名（内容仍为输入区当前文本）
+        # text read for preview: the task file name reuses the source file name (content is still the input area's current text)
         if self.input_path is not None:
             reqs[0].file_name = self.input_path.name
         submitted = self._enqueue_requests(reqs)
@@ -915,16 +909,14 @@ class TranslatePage:
             self.input_text.current.value = ""
             self.input_text.current.update()
             self.input_value = ""
-            self.input_path = None  # 重置预览标志，防下次误用
+            self.input_path = None  # reset the preview flag, preventing accidental reuse
 
-    # ════════════════════════════════════════════════════
-    #  Facade 回调（功能已移除，占位保留签名）
-    # ════════════════════════════════════════════════════
+    # ── Facade callbacks (functionality removed; placeholder signatures kept) ──
 
     def _on_service_change(self, status: dict):
-        """服务状态变更回调（功能已移除）。"""
+        """Service status change callback (functionality removed)."""
         pass
 
     def _on_task_change(self, snapshot):
-        """任务状态变更回调（功能已移除）。"""
+        """Task status change callback (functionality removed)."""
         pass

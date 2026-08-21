@@ -1,23 +1,25 @@
-"""配置类型声明式 schema — 定义每种配置的字段、默认值、构建/解析规则。
+"""Declarative schema for config types — defines each config's fields, defaults, and build/parse rules.
 
-全面重写为声明式引擎：
+Fully rewritten as a declarative engine:
 
-- ``Field`` 支持类型: text, multiline, integer, number, boolean, select, path,
-  list, object, json；并新增分组（``group``）、密文（``secret``）、
-  浏览按钮（``browse``）能力，``width`` 生效。
-- 值管线类型化：UI 层通过 ``read_control`` / ``to_control_value`` /
-  ``from_control_value`` 与表单控件交互，本模块**不 import flet 控件类**，
-  类型分派全部走 ``Field.type``。
-- 中间值统一为类型化 dict（boolean→bool、integer→int、number→float、
-  list→list、object/json→解析后的结构），``build_output`` 直接消费。
-- ``validate`` 返回 ``(field_errors: {key: [msg]}, general: [msg])``，
-  错误精确定位到字段，不再用字符串模糊匹配。
-- 单一注册表 ``CONFIG_GROUPS``（导航分组 + 全部类型），
-  ``ALL_CONFIG_TYPES`` / ``CONFIG_TYPE_LIST`` 由它派生。
-- 各配置 schema 与 configs/ 磁盘真实结构对齐（LLAMA 的 --keep/-n 已按需求
-  从表单移除；API 为 base_url/api_key/model/timeout、RULES 含 recognize/skip、
-  MOSS 拆分为 服务配置(moss)/转写参数(moss_args)/提示词(moss_prompt) 三词条、
-  ARGS 为 max_token_ratio/max_lines/request 嵌套）。
+- ``Field`` supports types: text, multiline, integer, number, boolean, select, path,
+  list, object, json; adds grouping (``group``), secret (``secret``), and browse-button
+  (``browse``) capabilities; ``width`` takes effect.
+- Typed value pipeline: the UI layer interacts with form controls through
+  ``read_control`` / ``to_control_value`` / ``from_control_value``; this module does
+  **not import flet control classes** — all type dispatch goes through ``Field.type``.
+- Intermediate values are unified as typed dicts (boolean→bool, integer→int,
+  number→float, list→list, object/json→parsed structures), consumed directly by
+  ``build_output``.
+- ``validate`` returns ``(field_errors: {key: [msg]}, general: [msg])``; errors are
+  located precisely per field, no longer matched by fuzzy strings.
+- Single registry ``CONFIG_GROUPS`` (nav groups + all types), with
+  ``ALL_CONFIG_TYPES`` / ``CONFIG_TYPE_LIST`` derived from it.
+- Each config schema aligns with the real on-disk structure in configs/ (LLAMA's
+  --keep/-n removed from the form per requirements; API is base_url/api_key/model/
+  timeout; RULES includes recognize/skip; MOSS is split into service config (moss) /
+  transcription args (moss_args) / prompts (moss_prompt) three entries; ARGS is
+  max_token_ratio/max_lines/request nested).
 """
 
 import json as _json
@@ -34,15 +36,15 @@ def _str_to_bool(v) -> bool:
     return str(v).lower() in ("true", "1", "yes")
 
 
-# ── 字段定义 ──
+# ── Field definitions ──
 
 class Field:
-    """单个配置字段的描述 — 声明式强类型控件。
+    """Description of a single config field — a declarative strongly-typed control.
 
-    扩展属性:
-        group:  分组名（None 表示不分组，渲染时直接平铺）
-        secret: 密文显示（如 API Key）
-        browse: None | "file" | "directory" — path 字段是否带浏览按钮及类型
+    Extended attributes:
+        group:  group name (None means ungrouped; rendered flat)
+        secret: show as secret text (e.g. API Key)
+        browse: None | "file" | "directory" — whether path fields get a browse button and its type
     """
 
     __slots__ = (
@@ -89,16 +91,16 @@ class Field:
         self.browse = browse
         self.scan_config_type = scan_config_type
         self.scan_glob = scan_glob or "*.json"
-        # 惰性选项提供者：返回 str 或 (key, text) 元组列表，渲染 select 时求值
-        # （避免模块顶层 import core 重链拖慢启动）
+        # Lazy options provider: returns a list of str or (key, text) tuples, evaluated
+        # when rendering the select (avoids importing the core chain at module top level, slowing startup)
         self.options_provider = options_provider
-        # 可见性条件：{字段key: 值} 全匹配才渲染（如 {"mode": "default"}）
+        # Visibility condition: rendered only when all {field key: value} match (e.g. {"mode": "default"})
         self.visible_when = visible_when
 
-    # ── 值管线（本模块零 flet 依赖，类型分派走 Field.type）──
+    # ── Value pipeline (this module has zero flet dependency; dispatch goes through Field.type) ──
 
     def default_typed(self):
-        """default（声明式字符串形式）→ 类型化中间值。"""
+        """default (declarative string form) → typed intermediate value."""
         t = self.type
         s = str(self.default).strip()
         if t == "boolean":
@@ -131,14 +133,14 @@ class Field:
         return ""  # text / multiline / path / select
 
     def read_control(self, ref) -> str | bool:
-        """从表单控件读取原始值（duck typing，不依赖 flet 类型）。"""
+        """Read the raw value from a form control (duck typing; no dependency on flet types)."""
         raw = getattr(ref, "value", None)
         if self.type == "boolean":
             return bool(raw) if raw is not None else False
         return raw if raw is not None else ""
 
     def to_control_value(self, value) -> str | bool:
-        """任意值（default 字符串 / parse 输出 / 类型化值）→ 控件初始值。"""
+        """Any value (default string / parse output / typed value) → control initial value."""
         if self.type == "boolean":
             return _str_to_bool(value)
         if value is None:
@@ -148,7 +150,7 @@ class Field:
         return str(value)
 
     def from_control_value(self, raw) -> object:
-        """控件值 → 类型化中间值；JSON 解析失败抛 ValueError（消息定位到字段）。"""
+        """Control value → typed intermediate value; JSON parse failure raises ValueError (message points to the field)."""
         t = self.type
         if t == "boolean":
             return bool(raw)
@@ -200,10 +202,10 @@ def _default_for_type(type: str):
     return ""
 
 
-# ── 分组描述 ──
+# ── Group description ──
 
 class FieldGroup:
-    """字段分组容器。"""
+    """Container for a field group."""
 
     __slots__ = ("name", "fields")
 
@@ -212,10 +214,10 @@ class FieldGroup:
         self.fields = fields
 
 
-# ── 配置类型定义 ──
+# ── Config type definition ──
 
 class ConfigType:
-    """一种配置类型的完整描述。"""
+    """Full description of one config type."""
 
     __slots__ = ("key", "label", "save_dir", "fields", "build_output",
                  "parse_for_form", "validate_fn", "_form_seed",
@@ -233,10 +235,10 @@ class ConfigType:
         self.parse_for_form = parse_for_form
         self.validate_fn = validate_fn
         self.name_filter = name_filter
-        # ini_section 非空表示该类型由 configs/system/default.ini 托管
-        # （保存/加载直接读写 ini，不走 save_dir 的 json 文件）
+        # A non-empty ini_section means the type is managed by configs/system/default.ini
+        # (save/load reads and writes the ini directly, not the save_dir json files)
         self.ini_section = ini_section
-        # parse 时的完整输出快照：含 _preserved_ 前缀的隐藏键（加载后原样写回，不进入表单）
+        # Full output snapshot from parse: includes hidden _preserved_-prefixed keys (written back as-is on load; not shown in the form)
         self._form_seed: dict | None = None
 
     @property
@@ -245,7 +247,7 @@ class ConfigType:
 
     @property
     def groups(self) -> list[FieldGroup]:
-        """按 Field.group 聚合；未分组字段归无名组（name=""）。"""
+        """Aggregate by Field.group; ungrouped fields fall into the unnamed group (name="")."""
         order, seen = [], {}
         for f in self.fields:
             g = f.group or ""
@@ -260,20 +262,20 @@ class ConfigType:
             for g in order
         ]
 
-    # ── 值管线 ──
+    # ── Value pipeline ──
 
     def to_form_values(self, data: dict) -> dict:
-        """原始 JSON → dict[key → 控件值]（加载文件 / 测试用）。
+        """Raw JSON → dict[key → control value] (for loading files / tests).
 
-        完整 parse 输出（含 _preserved_ 前缀隐藏键）存入 _form_seed，
-        供 collect_values 透传、build_output 原样写回。
+        The full parse output (including _preserved_-prefixed hidden keys) is stored in
+        _form_seed, passed through by collect_values and written back verbatim by build_output.
         """
         parsed = self.parse_for_form(data) if self.parse_for_form else data
         self._form_seed = dict(parsed)
         return {f.key: f.to_control_value(parsed.get(f.key, f.default)) for f in self.fields}
 
     def form_values_from_refs(self, refs: dict) -> dict:
-        """当前控件值 → dict[key → 控件值]（页面状态缓存）。"""
+        """Current control values → dict[key → control value] (page state cache)."""
         out = {}
         for f in self.fields:
             ref = refs.get(f.key)
@@ -281,7 +283,7 @@ class ConfigType:
         return out
 
     def populate_form(self, refs: dict, form_values: dict):
-        """dict[key → 控件值] → 写入控件（form_values 来自 to_form_values/form_values_from_refs）。"""
+        """dict[key → control value] → write to controls (form_values comes from to_form_values/form_values_from_refs)."""
         for f in self.fields:
             ref = refs.get(f.key)
             if ref is None:
@@ -290,9 +292,9 @@ class ConfigType:
             ref.value = f.to_control_value(raw)
 
     def collect_values(self, refs: dict) -> tuple[dict, dict]:
-        """控件 → (类型化中间值 dict, 字段解析错误 {key: [msg]})。"""
+        """Controls → (typed intermediate dict, field parse errors {key: [msg]})."""
         values, errors = {}, {}
-        # 透传 parse 时保存的隐藏键（_preserved_ 前缀）：不进表单、不校验，build 时原样写回
+        # Pass through hidden keys saved at parse (_preserved_ prefix): not shown or validated, written back as-is on build
         if self._form_seed:
             for k, v in self._form_seed.items():
                 if k.startswith("_preserved_"):
@@ -302,7 +304,7 @@ class ConfigType:
             if ref is not None:
                 raw = f.read_control(ref)
             elif self._form_seed is not None and f.key in self._form_seed:
-                raw = self._form_seed[f.key]  # 隐藏字段（visible_when）保留加载原值
+                raw = self._form_seed[f.key]  # hidden field (visible_when): keep the loaded original value
             else:
                 raw = f.default
             try:
@@ -313,7 +315,7 @@ class ConfigType:
         return values, errors
 
     def validate(self, values: dict) -> tuple[dict, list]:
-        """类型化中间值 → (字段错误 {key: [msg]}, 通用错误 [msg])。"""
+        """Typed intermediate values → (field errors {key: [msg]}, general errors [msg])."""
         field_errors, general = {}, []
         for f in self.fields:
             v = values.get(f.key)
@@ -346,9 +348,7 @@ class ConfigType:
         return field_errors, general
 
 
-# ══════════════════════════════════════════════════════════════
-#  LLaMA 服务器配置
-# ══════════════════════════════════════════════════════════════
+# ── LLaMA server config ──
 
 _LLAMA_FIELDS = [
     Field("llama_path", "LLaMA 路径", type="path", browse="directory",
@@ -364,7 +364,7 @@ _LLAMA_FIELDS = [
     Field("-c", "上下文长度 (-c)", type="integer", default="2048", min=128, width=180),
 ]
 
-# 与 configs/models/llama/default.json 的 server_arg 键对齐（不含 --keep/-n，已从表单移除）
+# Aligns with the server_arg keys in configs/models/llama/default.json (no --keep/-n; removed from the form)
 _SERVER_ARG_KEYS = {"-m", "--host", "--port", "-ngl", "-c"}
 
 
@@ -411,9 +411,7 @@ LLAMA = ConfigType(
     validate_fn=_llama_validate,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  API 配置（对齐 core/executor.py APITranslator: base_url/api_key/model/timeout）
-# ══════════════════════════════════════════════════════════════
+# ── API config (aligned with core/executor.py APITranslator: base_url/api_key/model/timeout) ──
 
 _API_FIELDS = [
     Field("base_url", "API 地址", default="https://api.deepseek.com", required=True,
@@ -435,9 +433,7 @@ API = ConfigType(
     parse_for_form=None,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  翻译参数（对齐 configs/translate/args_llama/*.json: max_token_ratio/max_lines/request）
-# ══════════════════════════════════════════════════════════════
+# ── Translation args (aligned with configs/translate/args_llama/*.json: max_token_ratio/max_lines/request) ──
 
 _ARGS_REQUEST_KEYS = (
     "model", "temperature", "top_p",
@@ -452,10 +448,10 @@ _ARGS_API_REQUEST_KEYS = (
 def _make_args_fields(model_default: str, max_lines_default: str = "3",
                       max_lines_min=1, include_max_tokens: bool = True,
                       include_max_token_ratio: bool = True) -> list:
-    """生成翻译参数字段 — Llama/API 两个词条同构，仅默认值与字段集不同。
+    """Generate translation-arg fields — Llama/API entries are isomorphic, differing only in defaults and field set.
 
-    API 版：不含 max_tokens（请求体白名单会剥离 None）与 max_token_ratio
-    （分块参数，API 后端用 core 默认值 0.4）；max_lines 默认 -1（不限制）。
+    API version: no max_tokens (the request-body whitelist strips None) and no max_token_ratio
+    (chunking param; the API backend uses the core default 0.4); max_lines defaults to -1 (unlimited).
     """
     fields = []
     if include_max_token_ratio:
@@ -529,9 +525,7 @@ ARGS_API = ConfigType(
     parse_for_form=_make_args_parse(_ARGS_API_REQUEST_KEYS, include_max_token_ratio=False),
 )
 
-# ══════════════════════════════════════════════════════════════
-#  Prompt 配置
-# ══════════════════════════════════════════════════════════════
+# ── Prompt config ──
 
 _PROMPT_FIELDS = [
     Field("system", "System Prompt", type="multiline",
@@ -559,9 +553,7 @@ PROMPT = ConfigType(
     parse_for_form=_prompt_parse,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  热词配置
-# ══════════════════════════════════════════════════════════════
+# ── Hotwords config ──
 
 _HOTWORDS_FIELDS = [
     Field("hotwords", "热词列表 (JSON 数组)", type="list",
@@ -590,11 +582,9 @@ HOTWORDS = ConfigType(
     parse_for_form=_hotwords_parse,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  术语表
-# ══════════════════════════════════════════════════════════════
+# ── Glossary ──
 
-# 默认 format（新配置/文件缺失时写回；对齐 configs/translate/glossary/template.json）
+# Default format (written back for new configs / missing files; aligned with configs/translate/glossary/template.json)
 _DEFAULT_GLOSSARY_FORMAT = {
     "with_info": "{src}->{dst} #{info}",
     "without_info": "{src}->{dst}",
@@ -630,7 +620,7 @@ def _glossary_validate(values: dict) -> tuple[dict, list]:
 
 
 def _glossary_build(values: dict) -> dict:
-    # format 不可自定义：保留加载时的原值（_preserved_format），缺失时用默认模板
+    # format is not customizable: keep the original value loaded (_preserved_format); use the default template when missing
     fmt = values.get("_preserved_format") or dict(_DEFAULT_GLOSSARY_FORMAT)
     return {
         "format": fmt,
@@ -640,7 +630,7 @@ def _glossary_build(values: dict) -> dict:
 
 def _glossary_parse(data: dict) -> dict:
     return {
-        # 隐藏键：format 原 dict 原样保留（写文件时写回，不在表单显示）
+        # Hidden key: the format dict is kept verbatim (written back on file write; not shown in the form)
         "_preserved_format": data.get("format"),
         "entries_json": _json.dumps(data.get("entries", []), ensure_ascii=False, indent=2),
     }
@@ -655,9 +645,7 @@ GLOSSARY = ConfigType(
     validate_fn=_glossary_validate,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  规则文件（对齐 core/rule_splitter.py: prefix/suffix/placeholder/skip/recognize）
-# ══════════════════════════════════════════════════════════════
+# ── Rules file (aligned with core/rule_splitter.py: prefix/suffix/placeholder/skip/recognize) ──
 
 _RULES_FIELDS = [
     Field("prefix", "前缀 (JSON 数组)", type="list",
@@ -704,9 +692,7 @@ RULES = ConfigType(
     parse_for_form=_rules_parse,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  输出配置
-# ══════════════════════════════════════════════════════════════
+# ── Output config ──
 
 _OUTPUT_FIELDS = [
     Field("output_dir", "输出目录", type="path", browse="directory", default="output",
@@ -724,10 +710,8 @@ OUTPUT = ConfigType(
     ini_section="output",
 )
 
-# ══════════════════════════════════════════════════════════════
-#  翻译默认配置 / 转写默认配置 — 管理各页面打开软件时的默认加载项
-#  （字段值为对应配置目录下的 .json 文件名，渲染时动态扫描生成下拉选项）
-# ══════════════════════════════════════════════════════════════
+# ── Translate / transcribe default configs — manage each page's default selections at app startup ──
+#    (field values are .json file names in the corresponding config dirs; options are scanned dynamically when rendering)
 
 _TRANSLATE_DEFAULT_FIELDS = [
     Field("llama_server", "llama 服务配置", type="select",
@@ -764,14 +748,11 @@ _TRANSCRIBE_DEFAULT_FIELDS = [
           scan_config_type="hotwords", default="default.json"),
 ]
 
-# ══════════════════════════════════════════════════════════════
-#  GSV 服务配置 / MOSS 服务配置 / 语音合成默认配置
-#  （configs/models 下按服务分子目录，服务配置统一为 default.json）
-# ══════════════════════════════════════════════════════════════
+# ── GSV service config / MOSS service config / TTS default config ──
+#    (configs/models has one subdirectory per service; service configs are uniformly default.json)
 
-#  GSV 服务配置（configs/models/gsv/*.json — 引擎级：设备 + 模型目录类）
-#  （角色相关：S1/S2 权重、参考音频/文本见「GSV 角色配置」词条）
-# ══════════════════════════════════════════════════════════════
+# ── GSV service config (configs/models/gsv/*.json — engine-level: device + model dirs) ──
+#    (role-related: S1/S2 weights, reference audio/text — see the "GSV Role Config" entry)
 
 _GSV_SERVICE_FIELDS = [
     Field("device", "推理设备", type="select", options=["auto", "cuda", "cpu"], default="auto"),
@@ -785,7 +766,7 @@ _GSV_SERVICE_FIELDS = [
 
 
 def _gsv_service_parse(data: dict) -> dict:
-    """gsv/default.json → 表单值（顶层平铺；未知键透传 _preserved_gsv）。"""
+    """gsv/default.json → form values (flattened at top level; unknown keys passed through as _preserved_gsv)."""
     out = {}
     for f in _GSV_SERVICE_FIELDS:
         v = data.get(f.key)
@@ -797,7 +778,7 @@ def _gsv_service_parse(data: dict) -> dict:
 
 
 def _gsv_service_build(values: dict) -> dict:
-    """表单值 → gsv/default.json 结构（空字段不写入，未知键回写）。"""
+    """Form values → gsv/default.json structure (empty fields omitted; unknown keys written back)."""
     out = {}
     for f in _GSV_SERVICE_FIELDS:
         v = values.get(f.key)
@@ -820,10 +801,8 @@ GSV = ConfigType(
     parse_for_form=_gsv_service_parse,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  GSV 角色配置（configs/tts/roles/role-*.json — 角色模型资产：
-#  S1/S2 权重 + 参考音频/文本；与「GSV 服务配置」合并后加载引擎）
-# ══════════════════════════════════════════════════════════════
+# ── GSV role config (configs/tts/roles/role-*.json — role model assets: S1/S2 weights +
+#    reference audio/text; merged with the "GSV service config" before loading the engine) ──
 
 _GSV_ROLE_FIELDS = [
     Field("mode", "模式", type="select", options=["default", "aux", "dual"], default="default",
@@ -845,13 +824,13 @@ _GSV_ROLE_FIELDS = [
 
 
 def _gsv_role_parse(data: dict) -> dict:
-    """role-*.json → 表单值（顶层平铺；未知键透传 _preserved_role）。"""
+    """role-*.json → form values (flattened at top level; unknown keys passed through as _preserved_role)."""
     out = {}
     for f in _GSV_ROLE_FIELDS:
         v = data.get(f.key)
         out[f.key] = "" if v is None else str(v)
     if not out.get("mode"):
-        out["mode"] = "default"  # 旧角色 JSON 无 mode 键 → 按 default 处理
+        out["mode"] = "default"  # old role JSON lacks the mode key → treat as default
     out["_preserved_role"] = _json.dumps(
         {k: v for k, v in data.items() if k not in {f.key for f in _GSV_ROLE_FIELDS}},
         ensure_ascii=False)
@@ -859,7 +838,7 @@ def _gsv_role_parse(data: dict) -> dict:
 
 
 def _gsv_role_build(values: dict) -> dict:
-    """表单值 → role-*.json 结构（空字段不写入，未知键回写）。"""
+    """Form values → role-*.json structure (empty fields omitted; unknown keys written back)."""
     out = {}
     for f in _GSV_ROLE_FIELDS:
         v = values.get(f.key)
@@ -886,8 +865,9 @@ _MOSS_PROMPT_DEFAULT = ("请将音频转写为文本，每一段需以起始时�
                         "（[S01]、[S02]…）开头，正文为对应的语音内容，并在段末标注"
                         "结束时间戳，以清晰标明该段语音范围。")
 
-# MOSS 服务配置词条仅承载服务参数；moss.json 中的转写参数/prompt 键
-# 由 _preserved_moss 透传回写（分别由「MOSS 转写参数」「MOSS 提示词」词条编辑）
+# The MOSS service-config entry only carries service params; the transcription-args/prompt
+# keys in moss.json are passed back through _preserved_moss (edited via the "MOSS Transcription
+# Args" and "MOSS Prompt" entries)
 _MOSS_FIELDS = [
     Field("model_path", "模型目录", type="path", browse="directory",
           default="dependencies/models/moss", required=True,
@@ -904,7 +884,7 @@ _MOSS_FIELDS = [
 
 
 def _moss_parse(data: dict) -> dict:
-    """moss.json → 表单值；非服务参数字段透传（_preserved_moss）。"""
+    """moss.json → form values; non-service-param fields passed through (_preserved_moss)."""
     out = {}
     for f in _MOSS_FIELDS:
         v = data.get(f.key)
@@ -921,7 +901,7 @@ def _moss_parse(data: dict) -> dict:
 
 
 def _moss_build(values: dict) -> dict:
-    """表单值 → moss.json 结构（服务参数 + 未知键回写，不丢失转写参数/prompt）。"""
+    """Form values → moss.json structure (service params + unknown keys written back; transcription args/prompt are not lost)."""
     out = {}
     for k in ("model_path", "device", "dtype"):
         v = values.get(k)
@@ -946,9 +926,7 @@ MOSS = ConfigType(
     parse_for_form=_moss_parse,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  MOSS 转写参数（任务级 configs/transcribe/args/*.json；服务默认见 moss/default.json）
-# ══════════════════════════════════════════════════════════════
+# ── MOSS transcription args (task-level configs/transcribe/args/*.json; service defaults in moss/default.json) ──
 
 _MOSS_ARGS_FIELDS = [
     Field("max_new_tokens", "最大生成 token", type="integer", default="65536", min=1),
@@ -1005,7 +983,7 @@ def _moss_args_build(values: dict) -> dict:
         out["decoding"] = decoding
     out["max_new_tokens"] = int(values.get("max_new_tokens") or 65536)
     out["max_len"] = int(values.get("max_len") or 131072)
-    # sampling 参数：留空不写入（executor 仅在 decoding="sample" 时消费）
+    # sampling params: omitted when empty (executor only consumes them when decoding="sample")
     for k, cast in (("temperature", float), ("top_p", float), ("top_k", int)):
         v = values.get(k)
         if v not in (None, ""):
@@ -1029,10 +1007,8 @@ MOSS_ARGS = ConfigType(
     parse_for_form=_moss_args_parse,
 )
 
-# ══════════════════════════════════════════════════════════════
-#  MOSS 提示词（configs/transcribe/prompts/*.json — 任务级提示词配置；
-#  服务级默认见 models/moss/default.json 的 prompt 键）
-# ══════════════════════════════════════════════════════════════
+# ── MOSS prompt (configs/transcribe/prompts/*.json — task-level prompt config;
+#    service-level default in the models/moss/default.json prompt key) ──
 
 _MOSS_PROMPT_FIELDS = [
     Field("prompt", "转写提示词", type="multiline", default=_MOSS_PROMPT_DEFAULT,
@@ -1041,7 +1017,7 @@ _MOSS_PROMPT_FIELDS = [
 
 
 def _moss_prompt_parse(data: dict) -> dict:
-    """moss.json → 表单值；非 prompt 键透传（_preserved_moss）。"""
+    """moss.json → form values; non-prompt keys passed through (_preserved_moss)."""
     out = {"prompt": str(data.get("prompt") or "")}
     out["_preserved_moss"] = _json.dumps(
         {k: v for k, v in data.items() if k != "prompt"},
@@ -1050,7 +1026,7 @@ def _moss_prompt_parse(data: dict) -> dict:
 
 
 def _moss_prompt_build(values: dict) -> dict:
-    """表单值 → moss.json 结构（prompt + 未知键回写，不丢失服务参数）。"""
+    """Form values → moss.json structure (prompt + unknown keys written back; service params not lost)."""
     out = {}
     if values.get("prompt"):
         out["prompt"] = values["prompt"]
@@ -1092,11 +1068,9 @@ TTS_DEFAULT = ConfigType(
     ini_section="gsv",
 )
 
-# ══════════════════════════════════════════════════════════════
-#  合成参数（configs/tts/args/*.json — 语音合成页「合成参数」模板）
-#  （ref_mode/prompt_lang/text_lang 等适配键由 _preserved_args 透传，
-#   保存时原样写回，不因本词条编辑而丢失）
-# ══════════════════════════════════════════════════════════════
+# ── TTS args (configs/tts/args/*.json — "TTS Args" template on the TTS page; adapter keys
+#    like ref_mode/prompt_lang/text_lang pass through _preserved_args and are written back
+#    verbatim on save, not lost by editing this entry) ──
 
 _GSV_ARGS_FIELDS = [
     Field("speed_factor", "语速", type="number", default="1.0", min=0.1, max=3),
@@ -1111,7 +1085,7 @@ _GSV_ARGS_FIELDS = [
 
 
 def _gsv_args_parse(data: dict) -> dict:
-    """configs/tts/args/*.json → 表单值；非合成参数字段透传（_preserved_args）。"""
+    """configs/tts/args/*.json → form values; non-TTS-arg fields passed through (_preserved_args)."""
     out = {}
     field_keys = {f.key for f in _GSV_ARGS_FIELDS}
     for f in _GSV_ARGS_FIELDS:
@@ -1129,7 +1103,7 @@ def _gsv_args_parse(data: dict) -> dict:
 
 
 def _gsv_args_build(values: dict) -> dict:
-    """表单值 → configs/tts/args/*.json 结构（留空字段不写入，未知键回写）。"""
+    """Form values → configs/tts/args/*.json structure (empty fields omitted; unknown keys written back)."""
     out = {}
     for f in _GSV_ARGS_FIELDS:
         v = values.get(f.key)
@@ -1169,9 +1143,7 @@ TRANSCRIBE_DEFAULT = ConfigType(
     ini_section="transcribe",
 )
 
-# ══════════════════════════════════════════════════════════════
-#  单一注册表 — 导航分组 + 全部类型（顺序即左侧导航显示顺序）
-# ══════════════════════════════════════════════════════════════
+# ── Single registry — nav groups + all types (order = left-side nav display order) ──
 
 CONFIG_GROUPS: list[tuple[str, list[ConfigType]]] = [
     ("系统", [TRANSLATE_DEFAULT, TRANSCRIBE_DEFAULT, TTS_DEFAULT, OUTPUT]),

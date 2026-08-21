@@ -1,15 +1,17 @@
 """
 Translator Core — public API.
 
-惰性导出（PEP 562 ``__getattr__``）：``from core import X`` 仍兼容，但导入
-单个子模块（如 ``core.contracts`` / ``core.system_config``）不再触发整包聚合
-导入。聚合导入曾连带加载 openai / numpy 重链（实测 ≈2.4s），
-拖慢应用骨架首帧；重模块统一延迟到 UI 后台初始化时导入。
+Lazy exports (PEP 562 ``__getattr__``): ``from core import X`` remains
+compatible, but importing a single submodule (e.g. ``core.contracts`` /
+``core.system_config``) no longer triggers a full-package aggregate import.
+Aggregate imports pull in the heavy openai / numpy chains (measured ≈2.4s),
+slowing the app shell's first frame; heavy modules are deferred to UI
+background initialization instead.
 
 All imports are via package-relative paths; no sys.path hacks needed.
 """
 
-from app import torch_runtime  # noqa: F401  # 任何 core 入口都先完成可插拔 torch 运行时选择（轻量，不 import torch）
+from app import torch_runtime  # noqa: F401  # ensure pluggable torch runtime selection at any core entry point (lightweight, no torch import)
 
 __all__ = [
     # task queue
@@ -41,9 +43,9 @@ __all__ = [
     "Segment", "lrc_write", "merge_repeated_segments",
 ]
 
-# 惰性导出映射：名字 → 所在子模块名（相对 core 包）
+# lazy-export mapping: name → owning submodule (relative to the core package)
 _LAZY_EXPORTS = {
-    # task queue（Task/TaskStatus 由 task_que 从 contracts 转发）
+    # task queue (Task/TaskStatus re-exported by task_que from contracts)
     "Task": "task_que",
     "TaskQueue": "task_que",
     "TranslationTaskQueue": "task_que",
@@ -78,7 +80,7 @@ _LAZY_EXPORTS = {
     "TranslationRequest": "contracts",
     "TranscriptionRequest": "contracts",
     "TaskSnapshot": "contracts",
-    # facade（子模块内实际属性名为 Facade）
+    # facade (the actual attribute inside the submodule is named Facade)
     "CoreFacade": "facade",
     # utils
     "load_json_file": "utils",
@@ -91,7 +93,7 @@ _LAZY_EXPORTS = {
 
 
 def __getattr__(name):
-    """惰性导出：首次访问时导入对应子模块并缓存到模块属性。"""
+    """Lazy export: import the corresponding submodule on first access and cache it on the module."""
     module_name = _LAZY_EXPORTS.get(name)
     if module_name is None:
         raise AttributeError(f"module 'core' has no attribute '{name}'")
@@ -99,5 +101,5 @@ def __getattr__(name):
 
     module = importlib.import_module(f".{module_name}", __name__)
     attr = getattr(module, "Facade" if name == "CoreFacade" else name)
-    globals()[name] = attr  # 缓存，后续访问零开销
+    globals()[name] = attr  # cache; subsequent access is zero-cost
     return attr

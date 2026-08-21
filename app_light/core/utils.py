@@ -3,22 +3,23 @@ from pathlib import Path
 
 from app.paths import project_root as _PROJECT_ROOT
 
-# 注意：本模块故意不在顶层 import numpy / inspect。
-# 它们只在少数函数内使用（测试音频生成），改为函数内惰性导入，
-# 避免核心链导入本模块时连带加载重库、拖慢应用启动首帧。
+# Note: this module deliberately does not import numpy / inspect at top level.
+# They are used only inside a few functions (test-audio generation), so they are
+# lazily imported within those functions to avoid pulling heavy libs into the
+# core chain when this module is imported, which would slow the app's first frame.
 
 
 def load_json_file(file_path):
-    """加载 JSON 配置文件，支持路径字符串、Path 对象或已解析的 dict。
+    """Load a JSON config file; accepts a path string, a Path object, or an already-parsed dict.
 
     Args:
-        file_path: 配置文件路径 (str 或 pathlib.Path) 或已解析的配置字典 (dict)。
+        file_path: config file path (str or pathlib.Path) or an already-parsed config dict (dict).
 
     Returns:
-        解析后的配置字典。
+        the parsed config dict.
 
     Raises:
-        TypeError: 当参数既不是 str、Path 也不是 dict 时。
+        TypeError: when the argument is neither str, Path, nor dict.
     """
     if isinstance(file_path, dict):
         return file_path
@@ -29,14 +30,14 @@ def load_json_file(file_path):
 
 
 def load_noval_file(file_path):
-    """读取文本文件内容，也支持直接传入文本内容。
+    """Read a text file's content; also accepts already-loaded text content directly.
 
     Args:
-        file_path: 文件路径 (str) 或已加载的文本内容 (str)。
-                   若是存在的文件路径则读取其内容，否则直接返回。
+        file_path: a file path (str) or already-loaded text content (str).
+                   If it is an existing file path, its content is read; otherwise it is returned as-is.
 
     Returns:
-        文件的文本内容。
+        the file's text content.
     """
     if isinstance(file_path, str):
         try:

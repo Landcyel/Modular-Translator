@@ -1,10 +1,10 @@
-"""vendor 目录复制与重型权重链接（junction）管理。
+"""Vendor directory copy and heavy-weight linking (junction) management.
 
-布局（vendor 根 = 本文件所在目录下的 vendor/）::
+Layout (vendor root = vendor/ under this file's directory)::
 
     vendor/
-    ├── tools/                  # 从 GPT-SoVITS-main/tools 复制（i18n/audio_sr 等）
-    └── GPT_SoVITS/             # 从 GPT-SoVITS-main/GPT_SoVITS 复制（仅推理所需）
+    ├── tools/                  # copied from GPT-SoVITS-main/tools (i18n/audio_sr, etc.)
+    └── GPT_SoVITS/             # copied from GPT-SoVITS-main/GPT_SoVITS (inference-only)
         ├── AR/ module/ text/ TTS_infer_pack/ BigVGAN/ feature_extractor/
         ├── f5_tts/ eres2net/ configs/
         ├── sv.py process_ckpt.py
@@ -14,12 +14,12 @@
             ├── fast_langdetect/                   → junction → models/gsv/fast_langdetect
             └── gsv-v4-pretrained/                 → junction → models/v4/gsv-v4-pretrained
 
-原则:
-- vendored 源码与上游逐字节一致（零修改），import 靠 sys.path + CWD=vendor 根解析
-  （上游同样依赖 CWD，见 GPT-SoVITS-main/GPT_SoVITS/TTS_infer_pack/TTS.py 顶部）
-- 重型权重不重复占盘: 用 Windows junction（mklink /J，免管理员）指向 models/；
-  junction 创建失败自动回退物理拷贝（copytree）
-- 本模块幂等，可反复调用
+Principles:
+- Vendored source is byte-identical to upstream (zero modification); imports resolve via sys.path + CWD=vendor root
+  (upstream also relies on CWD, see the top of GPT-SoVITS-main/GPT_SoVITS/TTS_infer_pack/TTS.py)
+- Heavy weights do not duplicate on disk: use Windows junctions (mklink /J, no admin) pointing into models/;
+  if junction creation fails, fall back to a physical copy (copytree)
+- This module is idempotent and can be called repeatedly
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ SOURCE_ROOT = Path(
     os.environ.get("GSV_SOURCE_ROOT", PROJECT_ROOT / "GPT-SoVITS-main")
 )
 
-# GPT_SoVITS/ 顶层不复制（训练/旧 GUI/导出，推理不需要）
+# Do not copy the GPT_SoVITS/ top-level (training/old GUI/export, not needed for inference)
 SKIP_TOP_FILES = {
     "inference_webui.py",
     "inference_webui_fast.py",
@@ -54,13 +54,13 @@ SKIP_TOP_FILES = {
     "export_torch_script.py",
     "export_torch_script_v3v4.py",
     "stream_v2pro.py",
-    # 注意: utils.py 不能排除 —— feature_extractor/cnhubert.py 顶层 import utils
+    # Note: utils.py must not be skipped — feature_extractor/cnhubert.py imports utils at top level
 }
 SKIP_TOP_DIRS = {"prepare_datasets", "__pycache__"}
 
 
 def _ignore_heavy(cur, names):
-    """copytree ignore: 跳过缓存与将由 junction 提供的重权重目录。"""
+    """copytree ignore: skip caches and heavy-weight dirs that will be provided by junctions."""
     rel = Path(cur).relative_to(SOURCE_ROOT / "GPT_SoVITS")
     out = set()
     for n in names:
@@ -77,20 +77,20 @@ def _ignore_heavy(cur, names):
 
 def _copy_tree(src: Path, dst: Path, ignore=None) -> None:
     if dst.exists():
-        return  # 已存在视为完成（幂等）
+        return  # already exists, treat as done (idempotent)
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src, dst, ignore=ignore, dirs_exist_ok=True)
 
 
 def copy_vendor() -> None:
-    """一次性复制推理所需源码到 vendor/（重权重目录除外）。"""
+    """Copy the inference-needed source to vendor/ once (except heavy-weight dirs)."""
     src_pkg = SOURCE_ROOT / "GPT_SoVITS"
     if not src_pkg.is_dir():
         raise FileNotFoundError(
             f"未找到 GPT-SoVITS 源码: {src_pkg}（可用环境变量 GSV_SOURCE_ROOT 指定）"
         )
 
-    # GPT_SoVITS/ 包本体（含顶层文件过滤）
+    # GPT_SoVITS/ package body (with top-level file filtering)
     if not PACKAGE_DIR.is_dir():
         PACKAGE_DIR.mkdir(parents=True)
     for name in sorted(os.listdir(src_pkg)):
@@ -104,7 +104,7 @@ def copy_vendor() -> None:
             if not dst.exists():
                 shutil.copy2(src, dst)
 
-    # tools/（repo 根，供 `from tools.i18n...` / `from tools.audio_sr...`）
+    # tools/ (repo root, for `from tools.i18n...` / `from tools.audio_sr...`)
     src_tools = SOURCE_ROOT / "tools"
     if src_tools.is_dir():
         _copy_tree(src_tools, TOOLS_DIR,
@@ -112,9 +112,9 @@ def copy_vendor() -> None:
 
 
 def default_links() -> dict[Path, Path]:
-    """默认 junction 映射: vendor 内链接 → models/ 目标（可被 env 覆盖）。
+    """Default junction map: vendor-internal links → models/ targets (can be overridden by env).
 
-    目标目录由 paths.resolve_config 的对应字段推导，保持单一事实来源。
+    Target dirs are derived from the corresponding fields of paths.resolve_config, keeping a single source of truth.
     """
     from . import paths
 
@@ -129,7 +129,7 @@ def default_links() -> dict[Path, Path]:
 
 
 def _is_link(path: Path) -> bool:
-    """判断是否为链接（Windows 上 os.path.islink 不识别 junction，需查 reparse 属性）。"""
+    """Return whether path is a link (on Windows os.path.islink does not recognize junctions; check the reparse attribute instead)."""
     if sys.platform == "win32":
         try:
             st = os.lstat(path)
@@ -140,23 +140,23 @@ def _is_link(path: Path) -> bool:
 
 
 def _remove_link_dir(path: Path) -> bool:
-    """删除已存在的 junction/symlink 本身（绝不跟随进目标）。"""
+    """Remove an existing junction/symlink itself (never follow into the target)."""
     if not path.exists() and not _is_link(path):
         return True
     if _is_link(path):
         try:
-            os.rmdir(path)  # junction/symlink 在 Windows 上可被 rmdir 摘除
+            os.rmdir(path)  # junctions/symlinks can be removed by rmdir on Windows
             return True
         except OSError:
             return False
-    return False  # 真实目录：不动（说明上次回退成了物理拷贝）
+    return False  # real dir: leave it (means a previous run fell back to a physical copy)
 
 
 def _make_junction(link: Path, target: Path) -> bool:
     if sys.platform == "win32":
         r = subprocess.run(
             ["cmd", "/c", "mklink", "/J", str(link), str(target)],
-            capture_output=True,  # mklink 输出为本地编码（GBK），不做文本解码
+            capture_output=True,  # mklink output is in the local encoding (GBK); do not decode as text
         )
         return r.returncode == 0 and link.exists()
     try:
@@ -167,9 +167,9 @@ def _make_junction(link: Path, target: Path) -> bool:
 
 
 def ensure_links(links: dict[Path, Path] | None = None) -> list[tuple[Path, str]]:
-    """确保每条 junction 存在且有效；失败回退物理拷贝。
+    """Ensure each junction exists and is valid; fall back to a physical copy on failure.
 
-    返回 [(link, "junction"|"copy"|"ok"), ...] 供日志/诊断。
+    Returns [(link, "junction"|"copy"|"ok"), ...] for logs/diagnostics.
     """
     if links is None:
         links = default_links()
@@ -179,10 +179,10 @@ def ensure_links(links: dict[Path, Path] | None = None) -> list[tuple[Path, str]
         if not target.is_dir():
             results.append((link, f"skip(target missing: {target})"))
             continue
-        # 有效校验: 链接存在且非悬空（取第一个子项探测）
+        # Validity check: link exists and is not dangling (probe with the first child)
         probe = next(target.iterdir(), None)
         if link.exists() and not _is_link(link):
-            results.append((link, "ok(real dir)"))  # 上次已回退拷贝
+            results.append((link, "ok(real dir)"))  # a previous run already fell back to a copy
             continue
         if link.exists():
             valid = probe is None or (link / probe.name).exists()
@@ -193,7 +193,7 @@ def ensure_links(links: dict[Path, Path] | None = None) -> list[tuple[Path, str]
         if _make_junction(link, target):
             results.append((link, "junction"))
             continue
-        # 回退: 物理拷贝
+        # Fallback: physical copy
         try:
             shutil.copytree(target, link, dirs_exist_ok=False)
             results.append((link, "copy"))
@@ -203,7 +203,7 @@ def ensure_links(links: dict[Path, Path] | None = None) -> list[tuple[Path, str]
 
 
 def ensure_vendor(auto_copy: bool = True) -> None:
-    """引擎初始化入口: 保证 vendor 代码存在 + 权重链接有效（幂等）。"""
+    """Engine init entry: ensure vendor code exists + weight links are valid (idempotent)."""
     if not (PACKAGE_DIR / "TTS_infer_pack" / "TTS.py").exists():
         if not auto_copy:
             raise FileNotFoundError(

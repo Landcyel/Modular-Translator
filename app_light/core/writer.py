@@ -8,7 +8,7 @@ class Segment:
     start: float
     end: float
     text: str
-    speaker: str = ""   # 说话人（如 MOSS 段的 "S01"；无 speaker 的段自动省略前缀）
+    speaker: str = ""   # speaker (e.g. "S01" for MOSS segments; segments without a speaker omit the prefix)
 
 def merge_repeated_segments(
     segments,
@@ -46,7 +46,7 @@ def merge_repeated_segments(
             start=group[0].start,
             end=group[-1].end,
             text=longest.text,
-            speaker=group[0].speaker,   # 同组说话人一致，保留首段
+            speaker=group[0].speaker,   # all segments in the group share the speaker; keep the first
         )
 
     for seg in segments[1:]:
@@ -62,17 +62,17 @@ def merge_repeated_segments(
 
 
 def format_lrc_time(seconds: float) -> str:
-    """LRC 时间轴：MM:SS.xx（分:秒.百分秒）。"""
+    """LRC timeline: MM:SS.xx (minutes:seconds.centiseconds)."""
     minutes = int(seconds // 60)
     secs = seconds % 60
     return f"{minutes:02d}:{secs:05.2f}"
 
 
 def lrc_write(segments, output_path: str):
-    """写标准 LRC 歌词：``[mm:ss.xx]<说话人>文本``（有 speaker 字段时带说话人前缀）。
+    """Write standard LRC lyrics: ``[mm:ss.xx]<speaker>text`` (with the speaker prefix when a speaker field exists).
 
-    MOSS 段带 speaker（如 ``[00:07.44]<S01>文本``）；无 speaker 的段
-    自动省略前缀。只有开始时间，无结束时间。
+    MOSS segments carry a speaker (e.g. ``[00:07.44]<S01>text``); segments without a
+    speaker automatically omit the prefix. Only the start time is used; no end time.
     """
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,7 @@ def lrc_write(segments, output_path: str):
 
 
 def _coerce_segments(segments) -> list:
-    """将 dict 段（{"start","end","text","speaker"?}）或 Segment 对象统一归一化为 Segment 列表。"""
+    """Normalize dict segments ({"start","end","text","speaker"?}) or Segment objects into a Segment list."""
     out = []
     for s in segments:
         if isinstance(s, dict):
@@ -101,7 +101,7 @@ def _coerce_segments(segments) -> list:
 
 
 def _fmt_srt_time(seconds: float) -> str:
-    """SRT 时间轴：HH:MM:SS,mmm。"""
+    """SRT timeline: HH:MM:SS,mmm."""
     ms = int(round(seconds * 1000))
     hours, ms = divmod(ms, 3600000)
     minutes, ms = divmod(ms, 60000)
@@ -110,7 +110,7 @@ def _fmt_srt_time(seconds: float) -> str:
 
 
 def _fmt_vtt_time(seconds: float) -> str:
-    """VTT 时间轴：HH:MM:SS.mmm。"""
+    """VTT timeline: HH:MM:SS.mmm."""
     ms = int(round(seconds * 1000))
     hours, ms = divmod(ms, 3600000)
     minutes, ms = divmod(ms, 60000)
@@ -119,7 +119,7 @@ def _fmt_vtt_time(seconds: float) -> str:
 
 
 def srt_write(segments, output_path: str):
-    """写 SRT 字幕：序号 + HH:MM:SS,mmm --> HH:MM:SS,mmm + 文本。"""
+    """Write SRT subtitles: index + HH:MM:SS,mmm --> HH:MM:SS,mmm + text."""
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     segments = merge_repeated_segments(_coerce_segments(segments))
@@ -131,7 +131,7 @@ def srt_write(segments, output_path: str):
 
 
 def vtt_write(segments, output_path: str):
-    """写 VTT 字幕：WEBVTT 头 + HH:MM:SS.mmm --> HH:MM:SS.mmm。"""
+    """Write VTT subtitles: WEBVTT header + HH:MM:SS.mmm --> HH:MM:SS.mmm."""
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     segments = merge_repeated_segments(_coerce_segments(segments))

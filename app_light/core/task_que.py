@@ -1,6 +1,7 @@
 """
-任务队列系统：为翻译和转写任务提供独立的顺序执行队列。
-支持实时调整未执行任务的顺序、取消正在执行的任务，以及暂停/恢复。
+Task queue system: provides separate sequential execution queues for translation
+and transcription tasks. Supports real-time reordering of pending tasks, cancelling
+a running task, and pause/resume.
 """
 from __future__ import annotations
 
@@ -12,31 +13,33 @@ from .contracts import Task, TaskStatus, CancelledError, NameNotFound
 from . import service
 from .moss.moss_service import MossService
 
-# Executor 仅用于类型标注（且函数签名均为惰性求值），顶层不再导入
-# core.executor —— 它在启动链中会连带加载 openai/numpy 等重库。真正需要
-# Executor 的 worker 执行路径由 service/executor 自身导入。
+# Executor is used only for type annotations (and all function signatures are lazily
+# evaluated), so core.executor is not imported at top level — importing it in the
+# startup chain would pull in heavy libs like openai/numpy. The worker execution path
+# that actually needs Executor imports it from service/executor itself.
 if TYPE_CHECKING:
     from .executor import Executor
 
 
-# ── 通用任务队列 ────────────────────────────────────────
+# ── Generic task queue ──
 
 class TaskQueue:
-    """通用顺序任务队列。
+    """Generic sequential task queue.
 
-    每个队列绑定一个 executor（Executor 实例），在 daemon 线程中按 FIFO
-    顺序执行任务。executor 实例由外部（CoreFacade）注入，队列不管理其
-    生命周期。默认执行体为 ``_run(task)`` —— 调用 ``excutor.execute(...)``，
-    子类可覆盖以定制执行逻辑。
+    Each queue is bound to one executor (an Executor instance) and runs tasks in FIFO
+    order on a daemon thread. The executor instance is injected externally
+    (CoreFacade); the queue does not manage its lifecycle. The default execution body
+    is ``_run(task)`` — it calls ``excutor.execute(...)``; subclasses may override it
+    to customize execution logic.
 
-    支持：
-    - add():    添加任务到队尾
-    - remove(): 移除 pending 任务
-    - cancel(): 取消 pending 或标记 running 任务
-    - reorder(): 改变 pending 任务在队列中的位置
-    - pause() / resume(): 暂停 / 恢复取任务
-    - get_all(): 获取全部任务的状态列表
-    - start() / stop(): 启停 worker 线程
+    Supports:
+    - add():     append a task to the tail
+    - remove():  remove a pending task
+    - cancel():  cancel a pending task or signal a running task
+    - reorder(): change a pending task's position in the queue
+    - pause() / resume(): pause / resume fetching tasks
+    - get_all(): get status list of all tasks
+    - start() / stop(): start / stop the worker thread
     """
 
     def __init__(self, excutor: Optional[Executor],
@@ -53,16 +56,16 @@ class TaskQueue:
         self._worker_thread: Optional[threading.Thread] = None
         self._running = False
         self._paused = threading.Event()
-        self._paused.set()  # 初始状态：未暂停（event 已设置，wait() 立即返回）
+        self._paused.set()  # initial state: not paused (event set, wait() returns immediately)
 
-    # ── 公开 API ─────────────────────────────────────
+    # ── Public API ──
 
     def set_on_status_change(self, callback: Optional[Callable]):
-        """注入/替换状态变化回调（供 Facade 子类在运行期接线）。"""
+        """Inject/replace the status-change callback (for Facade subclasses to wire at runtime)."""
         self._on_status_change = callback
 
     def add(self, task: Task) -> str:
-        """添加任务到队尾，返回 task_id。"""
+        """Append a task to the tail; returns the task_id."""
         with self._lock:
             self._tasks.append(task)
             self._order()
@@ -70,7 +73,7 @@ class TaskQueue:
         return task.id
 
     def remove(self, task_id: str) -> bool:
-        """移除一个 pending 任务（标记为 cancelled 并从队列删除）。"""
+        """Remove a pending task (mark it cancelled and delete it from the queue)."""
         removed = False
         with self._lock:
             for i, t in enumerate(self._tasks):
@@ -81,24 +84,24 @@ class TaskQueue:
                     removed = True
                     break
         if removed:
-            self._emit()  # 锁外回调，避免 UI 重绘反查队列时重入死锁
+            self._emit()  # callback outside the lock, avoiding a reentrancy deadlock when the UI redraws and re-queries the queue
         return removed
 
     def cancel(self, task_id: str) -> bool:
-        """取消 pending 任务（从队列移除），或向 running 任务发送取消信号。"""
+        """Cancel a pending task (remove it from the queue), or signal a running task."""
         with self._lock:
-            # 正在执行的任务 → 发送取消信号
+            # running task → send the cancel signal
             if self._current_task and self._current_task.id == task_id:
                 self._current_task.cancel()
                 return True
-            # pending 任务 → 直接移除      
+            # pending task → remove directly      
         return self.remove(task_id)
 
     def reorder(self, task_id: str, new_index: int) -> bool:
-        """将 pending 任务移到指定位置（0 = 下一个执行）。
+        """Move a pending task to a given position (0 = next to execute).
 
-        注意：如果 current_task 正在执行，new_index=0 表示排到 pending 队列最前。
-        移动成功后推送状态变更，驱动 UI 队列实时刷新。
+        Note: if current_task is running, new_index=0 means the front of the pending queue.
+        After a successful move, pushes a status change to drive real-time UI queue refresh.
         """
         moved = False
         with self._lock:
@@ -111,11 +114,11 @@ class TaskQueue:
                     moved = True
                     break
         if moved:
-            self._emit()  # 锁外推送，避免回调重入
+            self._emit()  # push outside the lock, avoiding callback reentrancy
         return moved
 
     def get_all(self) -> list[dict]:
-        """返回所有任务的状态快照（current + pending + finished），用于前端展示。"""
+        """Return status snapshots of all tasks (current + pending + finished), for the frontend."""
         with self._lock:
             result = []
             if self._current_task:
@@ -136,19 +139,19 @@ class TaskQueue:
             return self._finished_tasks if self._finished_tasks else []
     
     def update_progress(self, progress: float, payload: Optional[dict] = None):
-        """更新正在执行任务的进度（0.0 ~ 1.0）与可选详情（payload），线程安全。"""
+        """Update the running task's progress (0.0–1.0) and optional details (payload); thread-safe."""
         with self._lock:
             if self._current_task:
                 self._current_task.progress = progress
                 if payload is not None:
                     self._current_task.payload = payload
-        self._emit()  # 锁外回调，避免 UI 重绘反查队列时重入死锁
+        self._emit()  # callback outside the lock, avoiding a reentrancy deadlock when the UI redraws and re-queries the queue
 
     def pause(self):
-        """暂停队列 — 停止取新任务，同时挂起正在执行的任务（检查点等待）。
+        """Pause the queue — stop fetching new tasks and suspend the running task (checkpoint wait).
 
-        正在执行的任务会在下一个 chunk / segment 检查点阻塞等待，
-        直到 :meth:`resume` 恢复。
+        The running task blocks at the next chunk / segment checkpoint until
+        :meth:`resume` is called.
         """
         self._paused.clear()
         with self._lock:
@@ -157,7 +160,7 @@ class TaskQueue:
             current.pause()
 
     def resume(self):
-        """恢复队列 — 继续取任务，并让挂起的当前任务继续执行。"""
+        """Resume the queue — resume fetching tasks and let the suspended current task continue."""
         self._paused.set()
         with self._lock:
             current = self._current_task
@@ -167,14 +170,14 @@ class TaskQueue:
     def clear(self):
         with self._lock:
             self._tasks.clear()
-        self._emit()  # 锁外回调，避免 UI 重绘反查队列时重入死锁
+        self._emit()  # callback outside the lock, avoiding a reentrancy deadlock when the UI redraws and re-queries the queue
 
     @property
     def is_paused(self) -> bool:
         return not self._paused.is_set()
 
     def start(self):
-        """启动 worker daemon 线程。"""
+        """Start the worker daemon thread."""
         if self._running:
             return
         self._running = True
@@ -184,10 +187,11 @@ class TaskQueue:
         self._worker_thread.start()
 
     def stop(self):
-        """停止 worker daemon 线程,保留 pending 任务(幂等)。
+        """Stop the worker daemon thread, preserving pending tasks (idempotent).
 
-        worker 可能在 ``execute()`` 中阻塞(如网络请求),因此 join 带超时;
-        由调用方(Facade)保证先等待当前任务完成再调用本方法。
+        The worker may block inside ``execute()`` (e.g. network requests), so the join
+        has a timeout; the caller (Facade) guarantees the current task is awaited before
+        calling this method.
         """
         if not self._running:
             return
@@ -203,7 +207,7 @@ class TaskQueue:
 
     @property
     def active_count(self) -> int:
-        """正在执行 + 还在等待的任务总数。"""
+        """Total count of running + still-waiting tasks."""
         with self._lock:
             count = len(self._tasks)
             if self._current_task:
@@ -214,12 +218,12 @@ class TaskQueue:
     def is_running(self) -> bool:
         return self._running
 
-    # ── 内部 ─────────────────────────────────────────
+    # ── Internals ──
     def _run(self, task: Task):
-        """默认执行体：调用注入的 executor 执行任务。
+        """Default execution body: runs the task via the injected executor.
 
-        进度回调约定: progress_callback(current, total)，total<=0 时按 1 处理。
-        子类可覆盖以定制执行逻辑。
+        Progress-callback convention: progress_callback(current, total); total<=0 is
+        treated as 1. Subclasses may override to customize execution logic.
         """
         if self.excutor is None:
             raise RuntimeError(
@@ -236,13 +240,13 @@ class TaskQueue:
         )
 
     def _order(self):
-        """按列表位置管理 Task 的 index：pending 与 finished 各自从 0 编号。
+        """Manage each Task's index by list position: pending and finished each numbered from 0.
 
-        - ``_tasks``（pending）：index = 等待队列中的位置（0 = 下一个执行）
-        - ``_finished_tasks``（finished）：index = 完成顺序
+        - ``_tasks`` (pending): index = position in the waiting queue (0 = next to execute)
+        - ``_finished_tasks`` (finished): index = completion order
 
-        供 add / remove / reorder / worker 取任务与完成任务后调用，
-        保证各列表内 Task 的 ``index`` 与其列表位置一致。
+        Called after add / remove / reorder / worker task fetch and completion, so each
+        Task's ``index`` matches its list position.
         """
         for i, t in enumerate(self._tasks):
             t.index = i
@@ -251,7 +255,7 @@ class TaskQueue:
 
     def _worker_loop(self):
         while self._running:
-            # 暂停时阻塞等待，不中断正在执行的任务（此处检查在取新任务之前）
+            # block while paused, without interrupting the running task (checked before fetching a new task)
             self._paused.wait()
 
             task: Optional[Task] = None
@@ -259,13 +263,13 @@ class TaskQueue:
                 if self._tasks:
                     task = self._tasks.pop(0)
                     self._current_task = task
-                    self._order()  # 剩余 pending 的 index 重排（保持连续）
+                    self._order()  # renumber remaining pending indexes (keep contiguous)
 
             if task is None:
                 time.sleep(0.1)
                 continue
 
-            # 取到任务后，先检查是否已被取消
+            # after fetching a task, check first whether it was cancelled
             if task.is_cancelled:
                 task.status = TaskStatus.CANCELLED
                 self._emit()
@@ -291,11 +295,12 @@ class TaskQueue:
 
             self._emit()
             with self._lock:
-                # 取消的任务不进已完成队列（直接从队列消失）；failed 保留以便查看错误
+                # cancelled tasks do not enter the finished queue (they vanish from the
+                # queue); failed ones are kept so the error can be inspected
                 if task.status != TaskStatus.CANCELLED:
                     self._finished_tasks.append(task)
                 self._current_task = None
-                self._order()  # finished 按完成顺序编号
+                self._order()  # number finished by completion order
 
     def _emit(self):
         if self._on_status_change:
@@ -325,12 +330,12 @@ class TaskQueue:
         }
 
 
-# ── 翻译任务队列 ────────────────────────────────────────
+# ── Translation task queue ──
 
 class TranslationTaskQueue(TaskQueue):
-    """翻译任务队列 — 由外部注入 excutor executor。
+    """Translation task queue — executor injected externally.
 
-    用法:
+    Usage:
         excutor = LlamaService(model_config).start().get_executor()
         queue = TranslationTaskQueue(excutor)
         queue.start()
@@ -356,12 +361,12 @@ class TranslationTaskQueue(TaskQueue):
         self.excutor = excutor
 
 
-# ── 转写任务队列 ────────────────────────────────────────
+# ── Transcription task queue ──
 
 class TranscriptionTaskQueue(TaskQueue):
-    """转写任务队列 — 由外部注入 excutor executor。
+    """Transcription task queue — executor injected externally.
 
-    用法:
+    Usage:
         svc = MossService(model_config)
         svc.start()
         excutor = svc.get_executor()
@@ -386,13 +391,13 @@ class TranscriptionTaskQueue(TaskQueue):
             self.excutor = excutor
 
     def _run(self, task: Task):
-        # 进度语义：转写按时间轴上报（pos/total/speed），progress 存 0.0~1.0 比例，
-        # 详情（LRC 时间/速率）存 task.payload 供 UI 显示
+        # progress semantics: transcription reports along the timeline (pos/total/speed);
+        # progress stores a 0.0–1.0 ratio, details (LRC timings/rate) go in task.payload for the UI
         def _on_progress(pos: float, total: float, speed: float, segs=None):
             ratio = min(pos / total, 1.0) if total > 0 else 1.0
             payload = {"pos": pos, "total": total, "speed": speed}
             if isinstance(segs, dict):
-                # MOSS 状态载荷（status/generated_tokens/segments/unit）→ 并入 payload
+                # MOSS status payload (status/generated_tokens/segments/unit) → merged into payload
                 payload.update(segs)
             elif segs:
                 payload["segments"] = segs
@@ -405,12 +410,12 @@ class TranscriptionTaskQueue(TaskQueue):
         )
 
 
-# ── GSV 合成任务队列 ─────────────────────────────────────
+# ── GSV synthesis task queue ──
 
 class GsvTaskQueue(TaskQueue):
-    """GPT-SoVITS 合成任务队列 — 片段级 4 参进度（pos/total/speed/payload）。
+    """GPT-SoVITS synthesis task queue — fragment-level 4-arg progress (pos/total/speed/payload).
 
-    用法（与 TranscriptionTaskQueue 同构）::
+    Usage (isomorphic to TranscriptionTaskQueue)::
 
         svc = GsvService(model_config)
         svc.start()
@@ -430,8 +435,8 @@ class GsvTaskQueue(TaskQueue):
         self.excutor = excutor
 
     def _run(self, task: Task):
-        # 进度语义：按片段上报（pos/total/fragment），progress 存 0.0~1.0 比例，
-        # 详情存 task.payload（fragment 序号）供 UI 显示
+        # progress semantics: reported per fragment (pos/total/fragment); progress stores
+        # a 0.0–1.0 ratio, details (fragment number) go in task.payload for the UI
         def _on_progress(pos: float, total: float, speed=None, payload=None):
             ratio = min(pos / total, 1.0) if total > 0 else 1.0
             self.update_progress(ratio, {"pos": pos, "total": total, **dict(payload or {})})
@@ -443,7 +448,7 @@ class GsvTaskQueue(TaskQueue):
         )
 
 
-# ── 后端注册表 ──────────────────────────────────────────
+# ── Backend registry ──
 
 class Backends:
     LLAMA = (service.LlamaService, TranslationTaskQueue)

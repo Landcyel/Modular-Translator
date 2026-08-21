@@ -1,11 +1,12 @@
-"""Bundled FFmpeg locator — 项目内 FFmpeg/ffprobe/ffplay 调用的统一入口。
+"""Bundled FFmpeg locator — the unified entry point for in-project FFmpeg/ffprobe/ffplay calls.
 
-项目刚需 FFmpeg：随项目携带一份到 ``dependencies/FFmpeg/``，不依赖系统安装。
-- 新代码请优先使用本模块的显式路径常量 ``FFMPEG_BIN`` / ``FFPROBE_BIN`` /
-  ``FFPLAY_BIN``，或直接调用 ``run_ffmpeg`` / ``run_ffprobe``。
-- vendored 代码（GPT-SoVITS / UVR5）内部以裸名 ``ffmpeg`` / ``ffprobe`` 调用，
-  通过 ``ensure_ffmpeg_on_path()`` 把本目录前插到 ``PATH``，使这些调用同样
-  解析到项目自带副本。APP.py 启动时调用一次即可全局生效。
+FFmpeg is required by the project: a copy is bundled into ``dependencies/FFmpeg/``,
+so no system installation is needed.
+- New code should prefer this module's explicit path constants ``FFMPEG_BIN`` /
+  ``FFPROBE_BIN`` / ``FFPLAY_BIN``, or call ``run_ffmpeg`` / ``run_ffprobe`` directly.
+- Vendored code (GPT-SoVITS / UVR5) calls bare ``ffmpeg`` / ``ffprobe`` internally;
+  ``ensure_ffmpeg_on_path()`` prepends this directory to ``PATH`` so those calls
+  also resolve to the bundled copy. Called once at APP.py startup, it applies globally.
 """
 
 from __future__ import annotations
@@ -36,11 +37,11 @@ FFPLAY_BIN = FFMPEG_DIR / f"ffplay{_EXE_SUFFIX}"
 
 
 def ensure_ffmpeg_on_path() -> Path:
-    """把 ``dependencies/FFmpeg`` 前插到 ``PATH``（幂等），返回该目录。
+    """Prepend ``dependencies/FFmpeg`` to ``PATH`` (idempotent), returning that directory.
 
-    vendored 代码通过 ``os.system('ffmpeg ...')`` / ``ffmpeg-python`` 的
-    ``cmd=["ffmpeg", ...]`` 启动子进程，Windows 与 POSIX 均按 ``PATH``
-    解析可执行文件；前插后即命中项目自带副本。
+    Vendored code spawns subprocesses via ``os.system('ffmpeg ...')`` /
+    ``ffmpeg-python`` ``cmd=["ffmpeg", ...]``; both Windows and POSIX resolve
+    executables through ``PATH``, so after prepending they hit the bundled copy.
     """
     ffmpeg_dir = str(FFMPEG_DIR.resolve())
     current = os.environ.get("PATH", "")
@@ -51,17 +52,18 @@ def ensure_ffmpeg_on_path() -> Path:
 
 
 def _creationflags() -> int:
-    """Windows 下不弹控制台窗口（CREATE_NO_WINDOW）；其它平台返回 0。"""
+    """Do not pop a console window on Windows (CREATE_NO_WINDOW); return 0 on other platforms."""
     return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
 
 def configure_pydub() -> bool:
-    """把 pydub 的 ffmpeg 转换器指向项目自带 FFmpeg，并确保其可用。
+    """Point pydub's ffmpeg converter at the bundled FFmpeg and ensure it is usable.
 
-    pydub 的 ``AudioSegment.converter`` 使用裸名 ``ffmpeg``；``mediainfo_json``
-    与播放模块则通过 ``PATH`` 查找 ``ffprobe`` / ``ffplay``。本函数同时把
-    ``dependencies/FFmpeg`` 前插到 ``PATH``，因此 pydub 的全部底层调用都会
-    命中项目自带副本。pydub 缺失/导入失败时返回 ``False``。
+    pydub's ``AudioSegment.converter`` uses the bare name ``ffmpeg``;
+    ``mediainfo_json`` and the playback modules look up ``ffprobe`` / ``ffplay``
+    via ``PATH``. This function also prepends ``dependencies/FFmpeg`` to ``PATH``,
+    so all of pydub's low-level calls hit the bundled copy. Returns ``False`` if
+    pydub is missing or fails to import.
     """
     try:
         from pydub import AudioSegment  # noqa: PLC0415
@@ -74,17 +76,18 @@ def configure_pydub() -> bool:
 
 
 def run_ffmpeg(args: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """以显式路径运行项目自带 ffmpeg（默认不弹控制台窗口）。"""
+    """Run the bundled ffmpeg via explicit path (no console window by default)."""
     kwargs.setdefault("creationflags", _creationflags())
     return subprocess.run([str(FFMPEG_BIN), *args], **kwargs)
 
 
 def run_ffprobe(args: list[str], **kwargs) -> subprocess.CompletedProcess:
-    """以显式路径运行项目自带 ffprobe（默认不弹控制台窗口）。"""
+    """Run the bundled ffprobe via explicit path (no console window by default)."""
     kwargs.setdefault("creationflags", _creationflags())
     return subprocess.run([str(FFPROBE_BIN), *args], **kwargs)
 
 
-# 导入即生效（幂等）：任何模块只要引用本模块常量，vendored 代码的裸名
-# ``ffmpeg`` / ``ffprobe`` 子进程调用也会经 PATH 命中项目自带副本。
+# Takes effect on import (idempotent): any module referencing this module's
+# constants means bare ``ffmpeg`` / ``ffprobe`` subprocess calls from vendored
+# code also resolve through PATH to the bundled copy.
 ensure_ffmpeg_on_path()

@@ -1,13 +1,16 @@
-"""骨架屏组件 — 应用启动/页面切换时先行渲染的轻量界面。
+"""Skeleton screen components — a lightweight UI rendered first during app startup / page switches.
 
-两阶段渲染策略（避免打开白屏）：
-- 首帧只推骨架：品牌区 + 顶栏窗口控制 + 导航栏 + 内容区 ProgressRing
-  （控件总数约 40，毫秒级序列化/渲染，用户立刻看到界面框架而非白屏）。
-- 完整页面树在后台线程构建完成后，由 ui/layout 替换 content_area.content
-  （启动首页）或整体替换 page 根（骨架→完整界面切换）。
+Two-phase render strategy (avoids a blank screen on open):
+- The first frame pushes only the skeleton: brand area + top-bar window controls + nav
+  rail + a content-area ProgressRing (~40 controls total, serialized/rendered in
+  milliseconds, so the user immediately sees the app frame rather than a blank screen).
+- Once the full page tree is built on a background thread, ui/layout replaces
+  content_area.content (for the home page) or replaces the page root wholesale
+  (skeleton → full-UI switch).
 
-骨架阶段窗口控制按钮（最小化/最大化/关闭）保持真实可用，加载期间
-用户仍可拖拽/最小化/关闭窗口；导航栏不响应点击（加载中）。
+During the skeleton phase the window control buttons (minimize/maximize/close) stay fully
+functional, so the user can still drag/minimize/close the window while loading; the nav
+rail does not respond to clicks (loading).
 """
 
 import flet as ft
@@ -24,18 +27,19 @@ def skeleton_placeholder(
     ref: ft.Ref[ft.Container] | None = None,
     text_ref: ft.Ref[ft.Text] | None = None,
 ) -> ft.Container:
-    """内容区加载占位：shimmer 占位条 + ProgressRing + 提示文本（垂直水平居中）。
+    """Content-area loading placeholder: shimmer bars + ProgressRing + hint text (centered both axes).
 
-    title/subtitle 为可选标题与副标题（骨架阶段说明正在加载的模块）；
-    ref/text_ref 供 ui/layout 的加载动画协程驱动整区脉冲与提示文案轮换。
-    默认参数保持向后兼容（无参调用 = 原「转圈 + 正在加载…」）。
+    title/subtitle are optional title and subtitle (explaining which module is loading during
+    the skeleton phase); ref/text_ref let ui/layout's loading-animation coroutine drive the
+    whole-area pulse and hint-text rotation. Defaults keep backward compatibility (no-arg call
+    = the original "spinner + Loading...").
     """
     children: list[ft.Control] = []
     if title:
         children.append(ft.Text(title, size=Typography.BODY_LG,
                                 weight=ft.FontWeight.BOLD, color=Palette.TEXT))
         children.append(ft.Container(height=8))
-    # shimmer 占位条（圆角灰条模拟文本行，宽度递减）
+    # shimmer placeholder bars (rounded grey bars simulating text lines, decreasing widths)
     children.append(ft.Column(
         [
             ft.Container(width=300, height=10, border_radius=5, bgcolor=Palette.SURFACE2),
@@ -67,7 +71,7 @@ def skeleton_placeholder(
 
 
 def error_placeholder(message: str) -> ft.Container:
-    """页面构建失败占位：错误图标 + 信息（避免白屏/静默崩溃）。"""
+    """Page-build-failure placeholder: error icon + message (avoids blank screen / silent crash)."""
     return ft.Container(
         content=ft.Column(
             [
@@ -89,7 +93,7 @@ def error_placeholder(message: str) -> ft.Container:
 
 
 def _brand_container() -> ft.Container:
-    """品牌区（与 ui/layout 视觉一致，骨架阶段独立实例）。"""
+    """Brand area (visually consistent with ui/layout; a standalone instance during the skeleton phase)."""
     brand_icon_box = ft.Container(
         content=ft.Text("T", size=20, weight=ft.FontWeight.BOLD, color="#FFFFFF"),
         gradient=ft.LinearGradient(
@@ -126,7 +130,7 @@ def _brand_container() -> ft.Container:
 
 
 def _nav_rail_container() -> ft.Container:
-    """导航栏（骨架阶段不响应切换，展示完整导航结构）。"""
+    """Navigation rail (no switching during the skeleton phase; shows the full nav structure)."""
     rail = ft.NavigationRail(
         selected_index=0,
         label_type=ft.NavigationRailLabelType.ALL,
@@ -154,7 +158,7 @@ def _nav_rail_container() -> ft.Container:
                 icon=ft.Icons.ARTICLE, selected_icon=ft.Icons.ARTICLE,
                 label="日志", padding=ft.Padding.symmetric(vertical=8)),
         ],
-        on_change=None,  # 加载中不可切换
+        on_change=None,  # no switching while loading
         bgcolor=Palette.SURFACE,
     )
     return ft.Container(
@@ -168,7 +172,7 @@ def _nav_rail_container() -> ft.Container:
 
 
 def _app_bar(page: ft.Page) -> ft.Container:
-    """顶栏（窗口控制真实可用：拖拽区双击最大化 + 最小化/最大化/关闭）。"""
+    """Top bar (window controls fully functional: drag-area double-click to maximize + minimize/maximize/close)."""
     maximize_button = ft.IconButton(
         icon=ft.Icons.ASPECT_RATIO if page.window.maximized else ft.Icons.CROP_SQUARE,
         icon_size=18, icon_color=Palette.SUBTEXT,
@@ -228,7 +232,7 @@ def _app_bar(page: ft.Page) -> ft.Container:
 
 
 def skeleton_screen(page: ft.Page) -> ft.Control:
-    """轻量外壳：品牌区 + 顶栏 + 导航栏 + 内容区加载占位。"""
+    """Lightweight shell: brand area + top bar + nav rail + content-area loading placeholder."""
     left_column = ft.Column(
         [_brand_container(), _nav_rail_container()],
         spacing=0, width=Layout.SIDEBAR_WIDTH,

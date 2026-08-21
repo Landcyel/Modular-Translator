@@ -1,20 +1,20 @@
-"""语音合成页面（GSV / GPT-SoVITS）— 对接 AppFacade 实现合成服务与任务管理。
+"""TTS page (GSV / GPT-SoVITS) — integrates AppFacade for the synthesis service and task management.
 
-布局（三行 + 工作区）：
-1. 服务管理栏（角色服务配置 / 启停 + 角色切换【应用角色配置：重载模型】）
-2. 工作区左列：合成输入面板（文本 + 复刻参考 + 角色预设/合成参数 + 操作按钮）
-3. 工作区右列：任务队列（左列:右列 = 3:2）
+Layout (three rows + workspace):
+1. Service management bar (role service config / start-stop + role switch [Apply Role Config: reload model])
+2. Workspace left column: synthesis input panel (text + clone reference + role preset/TTS args + action buttons)
+3. Workspace right column: task queue (left:right = 3:2)
 
-任务契约（与 core/executor.py::GsvTTSExecutor 一致）::
+Task contract (consistent with core/executor.py::GsvTTSExecutor)::
 
-    TaskRequest(task_type="gsv", file_path=<目标文本>, configs={"args": {...}})
+    TaskRequest(task_type="gsv", file_path=<target text>, configs={"args": {...}})
 
-返回结果::
+Return result::
 
     {"audio_path", "sample_rate", "duration",
      "info": {"version", "ref_mode", "fragments", "seed", "elapsed_sec"}}
 
-设计见 PLANS/gsv-moss/app-integration-design.md §6。
+Design in PLANS/gsv-moss/app-integration-design.md §6.
 """
 
 import asyncio
@@ -38,23 +38,23 @@ from ui.widgets.config_picker import config_picker
 from ui.widgets.task_list import task_queue_panel
 
 
-# 参考音频扩展名白名单（GSV 参考硬校验 3~10s；mp3 等由引擎侧兜底读取）
+# Reference-audio extension whitelist (GSV hard-validates 3~10s; mp3 etc. are read as a fallback on the engine side)
 _REF_EXTENSIONS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus"}
 
 _TEXT_ENCODINGS = ("utf-8", "utf-8-sig", "cp932", "shift_jis", "gbk")
 
-# 输入面板控件统一宽度：参考语种/目标语种/复刻模式 与 角色预设/合成参数
-# 及 应用角色预设/提交至队列 保持一致
+# Unified input-panel control width: reference/target language, clone mode, and
+# role preset/TTS args plus Apply Role Preset / Submit to Queue all match
 _CONTROL_WIDTH = 170
 
 
 def build_tts(page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
-    """兼容包装 — 创建 TtsPage 实例并构建 UI。"""
+    """Compatibility wrapper — create a TtsPage instance and build the UI."""
     return TtsPage(page, facade, file_picker).build()
 
 
 def _read_text_file(path: Path) -> str | None:
-    """读取文件为文本；非文本格式（二进制 / 无法解码）返回 None。"""
+    """Read a file as text; returns None for non-text formats (binary / undecodable)."""
     try:
         data = path.read_bytes()
     except OSError:
@@ -70,7 +70,7 @@ def _read_text_file(path: Path) -> str | None:
 
 
 def _check_ref_duration(path: str) -> str | None:
-    """参考音频 3~10s 客户端预检；失败/不可读返回 None（引擎侧硬校验兜底）。"""
+    """Client-side precheck that the reference audio is 3~10s; returns None on failure/unreadable (engine-side hard check as fallback)."""
     try:
         import soundfile
         info = soundfile.info(path)
@@ -83,24 +83,24 @@ def _check_ref_duration(path: str) -> str | None:
 
 
 class TtsPage:
-    """语音合成工作台页面实例 — 长期持有状态，避免导航切换时丢失。"""
+    """TTS workbench page instance — holds state long-term so it survives navigation switches."""
 
     def __init__(self, page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
         self.page = page
         self.facade = facade
         self.file_picker = file_picker
 
-        # ── 服务状态 ──
+        # ── Service state ──
         self.is_online = False
         self.is_loading = False
-        self.is_paused = True  # 任务队列初始暂停：仅服务加载后才能开启
-        self.service_device = None  # 实际工作设备（cuda/cpu），状态栏着色显示
+        self.is_paused = True  # task queue starts paused: only enabled once the service is loaded
+        self.service_device = None  # actual working device (cuda/cpu), colored in the status bar
 
-        # ── 配置选择缓存 ──
+        # ── Config picker cache ──
         self.selected_role_config = None
         self.selected_service_config = None
 
-        # ── 输入状态缓存（切页重建恢复用）──
+        # ── Input state cache (restored on page-switch rebuild) ──
         self.selected_text = ""
         self.selected_text_lang = "zh"
         self.selected_ref_mode = "default"
@@ -108,13 +108,13 @@ class TtsPage:
         self.selected_prompt_text = ""
         self.selected_prompt_lang = "ja"
         self.selected_role_ref = ""
-        self.selected_adv_args = None      # 合成参数（configs/tts/args/*.json，Path 或 None）
+        self.selected_adv_args = None      # TTS args (configs/tts/args/*.json; Path or None)
 
-        # ── 队列状态缓存 ──
+        # ── Queue state cache ──
         self.current_task = None
         self.waiting_tasks = []
 
-        # ── 语音合成默认配置（configs/system/default.ini [gsv]）──
+        # ── TTS default config (configs/system/default.ini [gsv]) ──
         self._default_cfg: dict = {}
         self._load_default_config()
 
@@ -127,34 +127,32 @@ class TtsPage:
         self.emotion_ref_field = ft.Ref[ft.TextField]()
         self.prompt_text_field = ft.Ref[ft.TextField]()
         self.role_ref_field = ft.Ref[ft.TextField]()
-        # 模式联动引用（build 时填充，on_change 更新用）
+        # mode-linkage refs (filled at build; used by on_change updates)
         self._emotion_label = None
         self._emotion_field = None
         self._emotion_row = None
         self._role_row = None
         self.task_container = ft.Ref[ft.Container]()
 
-        # ── 控件直持引用（build 时赋值；save_ui_state 前有效）──
+        # ── Direct control references (assigned at build; valid until save_ui_state) ──
         self._text_lang_dd = None
         self._ref_mode_dd = None
         self._prompt_lang_dd = None
 
-        # ── 配置选择器 getter（build 时赋值）──
+        # ── Config picker getters (assigned at build) ──
         self._get_role_config = None
         self._get_adv_args = None
 
-        # ── UI sink 接线（name="gsv"，服务注册 key）──
+        # ── UI sink wiring (name="gsv", the service registration key) ──
         self._sink = None
         if self.facade is not None and hasattr(self.facade, "register_ui_sink"):
             self._sink = PageUiSink(page, self)
             self.facade.register_ui_sink("gsv", self._sink)
 
-    # ════════════════════════════════════════════════════
-    #  公开接口
-    # ════════════════════════════════════════════════════
+    # ── Public interface ──
 
     def update_service_status(self, online: bool, loading: bool = False, device: str | None = None):
-        """后端推送：更新服务状态（重赋值 + 刷新状态点/标签/启停按钮）。"""
+        """Backend push: update the service status (reassign + refresh status dot/label/start-stop buttons)."""
         was_online = self.is_online
         self.is_online = bool(online)
         self.is_loading = bool(loading)
@@ -169,21 +167,21 @@ class TtsPage:
             self._refresh_tasks()
 
     def update_tasks(self, current, waiting):
-        """后端推送：重赋值任务缓存并重建队列面板。"""
+        """Backend push: reassign the task cache and rebuild the queue panel."""
         self.current_task = current
         self.waiting_tasks = waiting or []
         self._render_panel()
 
     def build(self) -> ft.Control:
-        """构建/重建语音合成页面 UI。"""
+        """Build/rebuild the TTS page UI."""
 
-        # ── 服务配置选择器（服务管理栏内，启动服务按钮左侧）──
+        # ── Service config picker (inside the service management bar, left of the start button) ──
         service_picker, self._get_service_config = config_picker(
             "服务配置", [], config_type="gsv", glob_filter="*.json",
             width=Layout.PICKER_WIDTH_SM, value=self.selected_service_config,
         )
 
-        # ── 服务管理栏 ──
+        # ── Service management bar ──
         service_bar = service_management_bar(
             service_type="gsv",
             status_dot_ref=self.status_dot,
@@ -191,14 +189,14 @@ class TtsPage:
             start_btn_ref=self.start_btn,
             stop_btn_ref=self.stop_btn,
             backend_selector=None,
-            config_dropdown=None,           # 服务配置移入启停按钮组（紧邻启动按钮左侧）
+            config_dropdown=None,           # service config moved into the start/stop group (just left of the start button)
             pre_start_actions=[service_picker],
             on_start=self._load_model,
             on_stop=self._unload_model,
-            row1_cols=(4, 8),   # 状态 / 启停组（含服务配置，组内右对齐）
+            row1_cols=(4, 8),   # status / start-stop group (incl. service config, right-aligned in group)
         )
 
-        # ── 目标文本 ──
+        # ── Target text ──
         target_field = ft.TextField(
             ref=self.target_text,
             hint_text="输入待合成文本，或点击右上角选择目标文本文件…",
@@ -214,7 +212,7 @@ class TtsPage:
             value=self.selected_text,
         )
 
-        # ── 参考语种 / 目标语种 / 复刻模式（同一行，等宽；左/中/右对齐）──
+        # ── Reference language / target language / clone mode (same row, equal width; left/center/right aligned) ──
         self._prompt_lang_dd = ft.Dropdown(
             label="参考语种", dense=True, width=_CONTROL_WIDTH,
             text_style=ft.TextStyle(size=13, color=Palette.TEXT),
@@ -253,7 +251,7 @@ class TtsPage:
            alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
            vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        # ── 参考音频（default）/ 情绪参考音频（aux/dual）——同一栏动态改名 ──
+        # ── Reference audio (default) / emotion reference audio (aux/dual) — same field, renamed dynamically ──
         _is_default = (self.selected_ref_mode or "default") == "default"
         emotion_field = ft.TextField(
             ref=self.emotion_ref_field,
@@ -284,7 +282,7 @@ class TtsPage:
         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)
         self._emotion_row = emotion_row
 
-        # ── 参考文本（prompt_text）──
+        # ── Reference text (prompt_text) ──
         prompt_field = ft.TextField(
             ref=self.prompt_text_field,
             hint_text="参考音频逐字文本（建议填写，与音频一致效果最佳）",
@@ -307,7 +305,7 @@ class TtsPage:
             pick_prompt_text_btn,
         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)
 
-        # ── 角色参考 ──
+        # ── Role reference ──
         role_field = ft.TextField(
             ref=self.role_ref_field,
             hint_text="角色参考音频（dual/aux 必填；选择角色配置后自动预填）",
@@ -329,11 +327,11 @@ class TtsPage:
             ], spacing=4, expand=True),
             pick_role_btn,
         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END)
-        # default 模式隐藏角色参考栏（仅参考音频+参考文本两栏）
+        # default mode hides the role reference row (only reference audio + reference text rows)
         role_row.visible = not _is_default
         self._role_row = role_row
 
-        # ── 角色配置 / 合成参数（角色配置左对齐）──
+        # ── Role config / TTS args (role config left-aligned) ──
         role_picker, self._get_role_config = config_picker(
             "角色配置", [], config_type="gsv_role", glob_filter="*.json",
             width=_CONTROL_WIDTH, value=self.selected_role_config,
@@ -348,7 +346,7 @@ class TtsPage:
             args_picker,
         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        # 第二行：应用角色配置（左对齐） + 提交至队列（右对齐）
+        # Second row: Apply Role Config (left-aligned) + Submit to Queue (right-aligned)
         apply_role_btn = bordered_button(
             "应用角色配置", ft.Icons.SYNC,
             on_click=self._apply_role,
@@ -371,7 +369,7 @@ class TtsPage:
             submit_btn,
         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        # ── 合成输入面板 ──
+        # ── Synthesis input panel ──
         input_panel = ft.Container(
             content=ft.Column([
                 panel_header("合成文本",
@@ -398,7 +396,7 @@ class TtsPage:
             expand=3,
         )
 
-        # ── 任务队列 ──
+        # ── Task queue ──
         task_panel = ft.Container(
             ref=self.task_container,
             content=task_queue_panel(
@@ -411,8 +409,8 @@ class TtsPage:
             expand=2,
         )
 
-        # ── 工作区（宽屏：左 输入 / 右 队列；窄屏纵向排列）──
-        # 左列（合成文本）与任务队列宽度比 3:2
+        # ── Workspace (wide screens: left input / right queue; narrow screens stacked vertically) ──
+        # Left column (synthesis text) to task queue width ratio is 3:2
         is_narrow = self.page.width > 0 and self.page.width < Layout.DESKTOP_MIN_WIDTH
         left_col = ft.Column([
             input_panel,
@@ -438,7 +436,7 @@ class TtsPage:
            horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def save_ui_state(self) -> None:
-        """离开页面前从控件 refs 同步状态到实例属性。"""
+        """Sync state from control refs to instance attributes before leaving the page."""
         if self.target_text.current:
             self.selected_text = self.target_text.current.value or ""
         if self._text_lang_dd is not None:
@@ -461,7 +459,7 @@ class TtsPage:
             self.selected_adv_args = self._get_adv_args()
 
     def refresh(self) -> None:
-        """facade 回调或切换回页面时刷新。"""
+        """Refresh on facade callbacks or when switching back to the page."""
         if self.facade:
             s = self.facade.get_service_status("gsv")
             self.is_online = s.get("status") == "online"
@@ -469,12 +467,10 @@ class TtsPage:
         self._update_service_status()
         self._refresh_tasks()
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 服务状态与任务
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — service state and tasks ──
 
     def _load_default_config(self) -> None:
-        """打开软件时读取 [gsv] 默认配置（configs/system/default.ini）。"""
+        """Read the [gsv] default config at app startup (configs/system/default.ini)."""
         try:
             self._default_cfg = load_section("gsv")
         except Exception:
@@ -493,7 +489,7 @@ class TtsPage:
 
     @staticmethod
     def _safe_update(ctrl):
-        """控件未挂载（flet 0.86.2 首帧/重建时序）时静默跳过 update。"""
+        """Silently skip update when the control is not mounted (flet 0.86.2 first-frame/rebuild timing)."""
         if ctrl is None:
             return
         try:
@@ -530,7 +526,7 @@ class TtsPage:
 
     @staticmethod
     def _device_display(device: str | None) -> tuple[str | None, str | None]:
-        """返回 (显示文本, 颜色)；CUDA 绿 / CPU 橙，未知返回 None。"""
+        """Return (display text, color); CUDA green / CPU orange; unknown returns None."""
         if not device:
             return None, None
         dv = str(device).lower()
@@ -553,7 +549,7 @@ class TtsPage:
             label.spans = []
 
     def _apply_role_span(self, label: ft.Text) -> None:
-        """状态文本右侧追加当前角色配置名（如「 · 角色: role-ookura-lumine」）。"""
+        """Append the current role config name to the right of the status text (e.g. " · Role: role-ookura-lumine")."""
         if not self.is_online:
             return
         role_path = self._get_role_config() if self._get_role_config else None
@@ -682,16 +678,14 @@ class TtsPage:
                 log.record("error", f"[语音合成] 队列切换失败: {ex}")
         self._render_panel()
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 服务操作
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — service operations ──
 
     def _merged_gsv_config(self) -> dict:
-        """合并所选 GSV 服务配置与所选角色配置 → 提交 dict。
+        """Merge the selected GSV service config with the selected role config → submission dict.
 
-        角色配置（tts/roles/role-*.json）提供 S1/S2 权重与参考音频/文本，
-        服务配置（models/gsv/*.json，默认 default.json）提供 device/BERT/
-        CNHuBERT/SV；未选角色时仅服务配置（默认权重）。
+        The role config (tts/roles/role-*.json) provides S1/S2 weights and reference audio/text;
+        the service config (models/gsv/*.json, default default.json) provides device/BERT/
+        CNHuBERT/SV; with no role selected, only the service config (default weights) is used.
         """
         from core.gsv.paths import merge_service_role
 
@@ -735,9 +729,9 @@ class TtsPage:
         if self.facade is None:
             return
         try:
-            # 先置"卸载中"：停止按钮禁用（防重复点击），状态栏更新
+            # First set "unloading": disable the stop button (prevent repeated clicks) and update the status bar
             self.update_service_status(False, True)
-            # GSV 引擎 stop 即释放，挂起任务不可续跑 → 先取消当前任务
+            # The GSV engine releases on stop and suspended tasks cannot resume → cancel the current task first
             await asyncio.to_thread(self.facade.stop_service, "gsv", True)
             self.service_device = None
             self.update_service_status(False, False)
@@ -746,7 +740,7 @@ class TtsPage:
             self.update_service_status(False, False)
 
     async def _apply_role(self, e):
-        """在线切换角色：取消当前 → 停止 → 新配置启动（重载 10~20s）。"""
+        """Switch role online: cancel current → stop → start with the new config (reload 10~20s)."""
         if self.facade is None:
             return
         role_path = self._get_role_config() if self._get_role_config else None
@@ -809,15 +803,14 @@ class TtsPage:
                     ft.SnackBar(ft.Text(f"切换角色失败: {ex}"), bgcolor=Palette.ERROR)
                 )
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 角色默认值 / 参数模板 / 校验 / 提交
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — role defaults / args template / validation / submission ──
 
     def _prefill_role_defaults(self):
-        """读取当前角色配置的顶层 role_ref_audio/prompt_text，自动预填参考栏。
+        """Read the current role config's top-level role_ref_audio/prompt_text and prefill the reference rows.
 
-        default 模式：角色参考音频填入"参考音频"栏；aux/dual 填入"角色参考音频"栏。
-        角色 JSON 带 mode 键时同步模式下拉（可选联动）。
+        default mode: role reference audio fills the "Reference Audio" row; aux/dual fills the
+        "Role Reference Audio" row. When the role JSON has a mode key, sync the mode dropdown
+        (optional linkage).
         """
         cfg_path = self._get_role_config() if self._get_role_config else None
         if cfg_path is None:
@@ -828,7 +821,7 @@ class TtsPage:
             return
         if not isinstance(data, dict):
             return
-        # 角色 mode 联动模式下拉（若角色 JSON 声明了模式）
+        # role mode links the mode dropdown (when the role JSON declares a mode)
         role_mode = str(data.get("mode") or "").strip()
         if role_mode in ("default", "aux", "dual") and self._ref_mode_dd is not None:
             self._ref_mode_dd.value = role_mode
@@ -851,7 +844,7 @@ class TtsPage:
                 self.selected_prompt_text = prompt_text
 
     def _template_args(self) -> dict:
-        """读取合成参数 JSON（configs/tts/args/*.json）；"无"或读取失败返回 {}。"""
+        """Read the TTS args JSON (configs/tts/args/*.json); returns {} for "None" or read failure."""
         path = self._get_adv_args() if self._get_adv_args else None
         if path is None:
             return {}
@@ -861,11 +854,11 @@ class TtsPage:
             return {}
         if not isinstance(data, dict):
             return {}
-        # 防御：模板不得覆盖目标文本（text 由页面输入决定）
+        # defensive: the template must not override the target text (text is decided by the page input)
         return {k: v for k, v in data.items() if k != "text"}
 
     def _on_ref_mode_change(self, e):
-        """模式切换联动：参考栏动态改名 + 角色参考栏显隐。"""
+        """Mode-switch linkage: reference row renamed dynamically + role reference row show/hide."""
         mode = (self._ref_mode_dd.value if self._ref_mode_dd else None) or "default"
         self.selected_ref_mode = mode
         is_default = mode == "default"
@@ -882,10 +875,10 @@ class TtsPage:
             self._safe_update(self._role_row)
 
     def _validate_inputs(self) -> tuple[dict | None, str | None]:
-        """输入校验 → (args, error)。args 含全部合成参数；error 非空则中止提交。
+        """Validate input → (args, error). args holds all synthesis params; a non-empty error aborts submission.
 
-        合并顺序（低→高）：合成参数模板（configs/tts/args）→ 页面控件值
-        （覆盖模板的 ref_mode/prompt_lang/text_lang 等）。
+        Merge order (low → high): TTS args template (configs/tts/args) → page control values
+        (overriding the template's ref_mode/prompt_lang/text_lang etc.).
         """
         text = (self.target_text.current.value if self.target_text.current
                 else self.selected_text) or ""
@@ -903,7 +896,7 @@ class TtsPage:
         text_lang = (self._text_lang_dd.value if self._text_lang_dd else "zh") or "zh"
 
         ref_label = "参考音频" if ref_mode == "default" else "情绪参考音频"
-        # default：参考音频必填（官方 v2Pro 族需参考供 S2 音色锚定）；参考文本可选
+        # default: reference audio required (official v2Pro family needs a reference for S2 timbre anchoring); reference text optional
         if not emotion_ref:
             return None, f"请选择{ref_label}（3~10s）"
         if not Path(emotion_ref).is_file():
@@ -924,7 +917,7 @@ class TtsPage:
         args = {}
         args.update(self._template_args())
         if ref_mode == "default":
-            # default：单参考 + 参考文本（空则 ref_free）；不发 role_ref_audio
+            # default: single reference + reference text (ref_free when empty); no role_ref_audio sent
             args.update({
                 "ref_mode": "default",
                 "ref_audio_path": emotion_ref,
@@ -948,7 +941,7 @@ class TtsPage:
                 else self.selected_text).strip()
         return TaskRequest(
             task_type="gsv",
-            file_path=text,                 # Executor._resolve_value：非文件字符串原样返回
+            file_path=text,                 # Executor._resolve_value: non-file strings are returned as-is
             file_name=f"tts_{time.strftime('%Y%m%d%H%M%S')}.txt",
             configs={"args": args},
         )
@@ -990,9 +983,7 @@ class TtsPage:
                 ft.SnackBar(ft.Text(f"已提交至队列 (id={tid})"), bgcolor=Palette.SUCCESS)
             )
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 文件选择
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — file selection ──
 
     async def _pick_text_file(self, e):
         if self.file_picker is None:
@@ -1021,7 +1012,7 @@ class TtsPage:
             self.selected_text = text
 
     async def _pick_prompt_text_file(self, e):
-        """选择 .txt 文件 → 填入参考文本（prompt_text）。"""
+        """Pick a .txt file → fill the reference text (prompt_text)."""
         if self.file_picker is None:
             return
         try:

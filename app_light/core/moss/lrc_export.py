@@ -1,6 +1,6 @@
-"""LRC 歌词导出（标准 [mm:ss.cs] 时间戳 + 可选说话人前缀）。
+"""LRC lyrics export (standard [mm:ss.cs] timestamps + optional speaker prefix).
 
-服务端导出的 srt/ass 不带 LRC，此工具从内存 segments 客户端生成。
+Server-exported srt/ass have no LRC; this tool generates one client-side from in-memory segments.
 """
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def format_lrc_time(seconds: float) -> str:
-    """秒 → LRC 时间戳 ``mm:ss.cs``（分钟:秒.厘秒）。"""
+    """Seconds → LRC timestamp ``mm:ss.cs`` (minutes:seconds.centiseconds)."""
     seconds = max(0.0, float(seconds))
     mm = int(seconds) // 60
     ss = int(seconds) % 60
@@ -17,9 +17,9 @@ def format_lrc_time(seconds: float) -> str:
 
 
 def export_lrc(segments, out_path, show_speaker: bool = True) -> str:
-    """把 segments 写成 LRC 歌词文件，返回写入的文件路径。
+    """Write segments to an LRC lyrics file and return the written file path.
 
-    每行格式：``[mm:ss.cs]<S01>文本``（``show_speaker=True`` 时带说话人前缀）。
+    Line format: ``[mm:ss.cs]<S01>text`` (with speaker prefix when ``show_speaker=True``).
     """
     lines = []
     for seg in segments:

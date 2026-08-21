@@ -1,15 +1,16 @@
-"""nltk 数据安装脚本（GPT-SoVITS 英文 G2P 依赖）。
+"""nltk data installer script (GPT-SoVITS English G2P dependency).
 
-vendored text/english.py 与 g2p_en 需要:
-- corpora/cmudict                       （g2p_en G2p.__init__ 用）
-- corpora/cmudict.zip                   （g2p_en 用 find('corpora/cmudict.zip') 探测）
-- taggers/averaged_perceptron_tagger_eng（nltk.pos_tag 用, nltk>=3.9 新格式）
-- taggers/averaged_perceptron_tagger.zip（g2p_en 用 find('...tagger.zip') 探测）
+The vendored text/english.py and g2p_en require:
+- corpora/cmudict                       (used by g2p_en G2p.__init__)
+- corpora/cmudict.zip                   (probed by g2p_en via find('corpora/cmudict.zip'))
+- taggers/averaged_perceptron_tagger_eng (used by nltk.pos_tag; new format for nltk>=3.9)
+- taggers/averaged_perceptron_tagger.zip (probed by g2p_en via find('...tagger.zip'))
 
-上游数据源 raw.githubusercontent.com 在本机被 DNS 污染（解析到 127.0.0.1，
-nltk 的 pathsec 会拦截并报 SSRF），因此按序尝试 CDN/代理镜像拉取。
+The upstream data source raw.githubusercontent.com is DNS-polluted on this machine
+(resolves to 127.0.0.1, and nltk's pathsec blocks it as SSRF), so CDN/proxy mirrors
+are tried in order.
 
-用法: .venv/Scripts/python -m core.gsv.setup_nltk_data
+Usage: .venv/Scripts/python -m core.gsv.setup_nltk_data
 """
 
 from __future__ import annotations
@@ -20,17 +21,17 @@ import sys
 import zipfile
 from pathlib import Path
 
-import nltk  # 确保 nltk 已安装
+import nltk  # ensure nltk is installed
 
 RAW_BASE = "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages"
-# 按序尝试: jsdelivr CDN → 通用 GitHub 代理
+# Try in order: jsdelivr CDN → generic GitHub proxy
 SOURCES = [
     f"https://cdn.jsdelivr.net/gh/nltk/nltk_data@gh-pages/packages",
     f"https://ghproxy.net/{RAW_BASE}",
     f"https://gh-proxy.com/{RAW_BASE}",
 ]
 
-# (资源名, 相对 nltk_data 的落点, 是否解压)
+# (resource name, destination relative to nltk_data, whether to unzip)
 JOBS = [
     ("corpora/cmudict", "corpora", True),
     ("corpora/cmudict.zip", "corpora", False),
@@ -40,7 +41,7 @@ JOBS = [
 
 
 def nltk_data_root() -> Path:
-    # nltk 搜索路径之一: <venv>/nltk_data（gitignored, 项目作用域）
+    # One of nltk's search paths: <venv>/nltk_data (gitignored, project-scoped)
     return Path(sys.prefix) / "nltk_data"
 
 
@@ -81,13 +82,13 @@ def main() -> int:
             target.write_bytes(data)
             print(f"({len(data)/1e6:.1f}MB)")
 
-    # 验证
+    # Verify
     from nltk.corpus import cmudict
     from nltk import pos_tag
 
     print(f"  [ok] cmudict words: {len(cmudict.dict())}")
     print(f"  [ok] pos_tag: {pos_tag(['hello'])}")
-    # g2p_en 的 zip 探测（无网络尝试即通过）
+    # g2p_en's zip probes (pass without network attempts)
     import g2p_en  # noqa: F401
 
     nltk.data.find("corpora/cmudict.zip")

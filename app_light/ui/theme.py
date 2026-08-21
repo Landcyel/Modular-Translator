@@ -1,8 +1,8 @@
-"""配色常量与设计令牌 — 仅深色主题。"""
+"""Color constants and design tokens — dark theme only."""
 
 
 class Palette:
-    """深色色板。"""
+    """Dark palette."""
     PRIMARY        = "#6366F1"
     PRIMARY_LIGHT  = "#818CF8"
     PRIMARY_DARK   = "#4F46E5"
@@ -34,7 +34,7 @@ class Palette:
 
 
 class Typography:
-    """字号比例令牌。"""
+    """Font size ratio tokens."""
     CAPTION    = 10
     SMALL      = 11
     BODY_SM    = 12
@@ -48,7 +48,7 @@ class Typography:
 
 
 class Radius:
-    """圆角令牌。"""
+    """Corner radius tokens."""
     XS  = 6
     SM  = 8
     MD  = 10
@@ -57,7 +57,7 @@ class Radius:
 
 
 class Anim:
-    """动效令牌。"""
+    """Animation tokens."""
     FAST    = 50
     NORMAL  = 50
     SLOW    = 50
@@ -65,13 +65,14 @@ class Anim:
 
 
 class Layout:
-    """可复用布局尺寸令牌 — 统一各页面间距/内边距/高度等数值。"""
-    # 内容区域内统一间距：复合组件之间、组件到内容区域边界均使用此值
-    # （= 翻译页「源文本」面板与「服务栏」之间的间距，全局一致）
+    """Reusable layout size tokens — unify spacing/padding/heights across pages."""
+    # Uniform spacing inside the content area: used between composite components and
+    # from components to the content-area boundary (= the gap between the Source Text
+    # panel and the service bar on the Translate page, applied globally)
     CONTENT_GAP       = 16
-    PAGE_PADDING      = CONTENT_GAP   # 内容区到窗口边界的内边距
-    SECTION_GAP       = CONTENT_GAP   # 段（复合组件）间距
-    COLUMN_SPACING    = CONTENT_GAP   # 双栏/纵向列间距
+    PAGE_PADDING      = CONTENT_GAP   # padding from the content area to the window edge
+    SECTION_GAP       = CONTENT_GAP   # section (composite component) spacing
+    COLUMN_SPACING    = CONTENT_GAP   # two-column / vertical column spacing
 
     CARD_PADDING      = 20
     CARD_RADIUS       = 16
@@ -84,10 +85,11 @@ class Layout:
     WORKSPACE_HEIGHT           = 520
     SETTINGS_WORKSPACE_HEIGHT  = 600
 
-    BRAND_HEIGHT   = 68   # 品牌区固定高度
-    APP_BAR_HEIGHT = 34   # 顶栏固定高度 = 品牌区一半
-    # 侧栏（品牌区/导航栏/左列）统一宽度：220 时品牌区文本列仅 142px（220-32 padding-36 图标-10 spacing），
-    # 放不下 16px 粗体 "Modular Translator"（约需 150px+）；加宽至 250 后可用约 172px，保证文字完整显示
+    BRAND_HEIGHT   = 68   # Fixed brand area height
+    APP_BAR_HEIGHT = 34   # Fixed top bar height = half the brand area
+    # Unified sidebar width (brand/nav/left column): at 220 the brand text column is
+    # only 142px (220-32 padding-36 icon-10 spacing), too narrow for 16px bold
+    # "Modular Translator" (~150px+); widened to 250 gives ~172px so the text fits fully
     SIDEBAR_WIDTH  = 250
 
     COLUMN_SPACING    = 16

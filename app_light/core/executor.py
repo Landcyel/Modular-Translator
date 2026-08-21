@@ -27,17 +27,20 @@ from .contracts import CancelledError
 from .utils import load_json_file
 from .rule_splitter import RuleSplitter, SentenceInfo
 
-# 注意：openai / requests / numpy 均为重库（合计数秒），已改为各使用点
-# 函数内惰性导入。core.executor 被 task_que / moss_transcriber 等核心模块
-# 在启动链中导入，顶层 import 会拖慢应用骨架首帧。
+# Note: openai / requests / numpy are all heavy libraries (several seconds combined);
+# they are now lazily imported inside the functions that use them. core.executor is
+# imported by core modules (task_que / moss_transcriber) in the startup chain, so
+# top-level imports would slow the app shell's first frame.
 
 
 def _wait_paused(pause_event, cancel_event) -> bool:
-    """暂停检查点：任务被暂停则阻塞等待恢复；被取消返回 False。
+    """Pause checkpoint: block while paused until resumed; return False if cancelled.
 
-    ``pause_event`` 为 None（直接调用 execute 之外场景）或未暂停时立即返回 True。
+    Returns True immediately when ``pause_event`` is None (scenarios outside direct
+    execute calls) or not paused.
     """
-    # 取消优先：未暂停时也必须响应 cancel（否则取消仅对暂停中任务生效）
+    # cancel takes priority: must respond to cancel even when not paused (otherwise
+    # cancel would only affect paused tasks)
     if cancel_event is not None and cancel_event.is_set():
         return False
     if pause_event is None or pause_event.is_set():
@@ -49,22 +52,21 @@ def _wait_paused(pause_event, cancel_event) -> bool:
     return True
 
 
-# ═══════════════════════════════════════════════════════════
-# Executor — abstract base
-# ═══════════════════════════════════════════════════════════
+# ── Executor — abstract base ──
 
 class Executor(ABC):
     """Abstract execution unit consumed by a TaskQueue worker."""
 
-    # 诊断日志回调（UI 经 service 透传注入；无回调退化 print，库调用不受影响）
+    # diagnostic log callback (injected by the UI via service; falls back to print
+    # without a callback, so library callers are unaffected)
     _on_log = None
 
     def set_on_log(self, callback: Optional[Callable]):
-        """注入/替换诊断日志回调（level, message）；无回调时退化 print。"""
+        """Inject/replace the diagnostic log callback (level, message); falls back to print without one."""
         self._on_log = callback
 
     def _log(self, level: str, message: str) -> None:
-        """记录一条诊断日志（level: info/warn/error）。"""
+        """Record a diagnostic log entry (level: info/warn/error)."""
         if self._on_log is not None:
             try:
                 self._on_log(level, message)
@@ -83,16 +85,17 @@ class Executor(ABC):
         """Run the task and return its result."""
         ...
 
-    # ── 任务解析（多格式读取，类似 Service._resolve_config）──────────
+    # ── Task resolution (multi-format reading, like Service._resolve_config) ──
 
     @staticmethod
     def _resolve_value(value):
-        """多格式读取单个值。
+        """Read a single value in multiple formats.
 
-        - ``dict`` → 原样返回（已是解析结果）
-        - 存在的文件路径（``Path``/``str``）→ UTF-8 读入；可解析为 JSON 则返回
-          dict，否则返回文本内容；二进制文件（如音频）不强行解码，原样返回
-        - 其余（如 ``"ja"`` 这类非文件字符串）→ 原样返回
+        - ``dict`` → returned as-is (already a parsed result)
+        - an existing file path (``Path``/``str``) → read as UTF-8; parsed as JSON
+          dict when possible, otherwise returned as text; binary files (e.g. audio)
+          are not force-decoded and returned as-is
+        - anything else (e.g. non-file strings like ``"ja"``) → returned as-is
         """
         if isinstance(value, dict):
             return value
@@ -102,7 +105,7 @@ class Executor(ABC):
                 try:
                     text = path.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError):
-                    return value  # 二进制文件（音频等），原样返回
+                    return value  # binary file (audio etc.), return as-is
                 try:
                     return json.loads(text)
                 except json.JSONDecodeError:
@@ -111,15 +114,16 @@ class Executor(ABC):
         return value
 
     def _resolve_task(self, task):
-        """父类通用解析：仅实现多格式文件读取，不做语义解析。
+        """Base-class generic resolution: only multi-format file reading, no semantics.
 
-        返回 ``(source, configs_dict)``：
+        Returns ``(source, configs_dict)``:
 
-        - ``source`` — 对 ``task.file_path`` 做 :meth:`_resolve_value` 的结果
-        - ``configs_dict`` — 对 ``task.configs`` 中每个值做 :meth:`_resolve_value`
+        - ``source`` — result of :meth:`_resolve_value` on ``task.file_path``
+        - ``configs_dict`` — result of :meth:`_resolve_value` on each value in ``task.configs``
 
-        子类应覆盖本方法：先调用 ``super()._resolve_task(task)`` 拿到通用读取
-        结果，再自行实现语义解析（如音频路径、RuleSplitter 构建等）。
+        Subclasses should override this: call ``super()._resolve_task(task)`` for the
+        generic reading, then implement semantic parsing (audio paths, RuleSplitter
+        construction, etc.).
         """
         source = self._resolve_value(task.file_path)
         configs = {}
@@ -128,17 +132,16 @@ class Executor(ABC):
         return source, configs
 
 
-# ═══════════════════════════════════════════════════════════
-# Translator — abstract translation base
-# ═══════════════════════════════════════════════════════════
+# ── Translator — abstract translation base ──
 
 class Translator(Executor):
     """Abstract translator with chunking, prompt rendering, and merge logic.
 
     Subclasses must implement ``_translate()`` for a single request."""
 
-    # 单次翻译失败重试次数：服务停止中断的 chunk 在恢复后经重试补译
-    # （_translate 对连接中断/超时返回 None，重试前重新等待后端就绪）
+    # retry count for a single failed translation: chunks interrupted by a service
+    # stop are re-translated after recovery via retries
+    # (_translate returns None on connection drop/timeout; before retrying it re-waits for backend readiness)
     _translate_retries = 3
 
     def __init__(self, config=None):
@@ -147,7 +150,7 @@ class Translator(Executor):
         if config is not None:
             self.config = load_json_file(config)
 
-    # ── Executor interface ───────────────────────────
+    # ── Executor interface ──
 
     def execute(
         self,
@@ -157,13 +160,13 @@ class Translator(Executor):
     ) -> str | None:
         """Run translation from *task*.
 
-        Task 契约::
+        Task contract::
 
-            task.file_path                    待翻译文本文件（Path/str/已读文本）
-            task.configs["translate_config"]  翻译参数（路径 → JSON dict）
-            task.configs["prompts"]           prompt 模板（路径 → JSON dict）
-            task.configs["glossary"]          术语表（路径 → JSON dict，可选）
-            task.configs["rule"]              分割规则（路径 → JSON dict，可选）
+            task.file_path                    source text file (Path/str/read text)
+            task.configs["translate_config"]  translation args (path → JSON dict)
+            task.configs["prompts"]           prompt templates (path → JSON dict)
+            task.configs["glossary"]          glossary (path → JSON dict, optional)
+            task.configs["rule"]              split rules (path → JSON dict, optional)
         """
         cfg = self._resolve_task(task)
         pause_event = getattr(task, "_pause_event", None)
@@ -179,13 +182,13 @@ class Translator(Executor):
         )
 
     def _resolve_task(self, task):
-        """翻译语义解析：file_path 读原文文本，configs["rule"] 构建 RuleSplitter。"""
+        """Translation-specific resolution: read source text from file_path, build a RuleSplitter from configs["rule"]."""
         source, configs = super()._resolve_task(task)
 
         if isinstance(source, str):
             text = source
         else:
-            # 兜底：二进制/未解析路径按文本重读（正常场景不会走到）
+            # fallback: re-read binary/unresolved paths as text (not reached in normal flow)
             text = Path(task.file_path).read_text(encoding="utf-8")
 
         splitter = None
@@ -201,18 +204,19 @@ class Translator(Executor):
             "splitter": splitter,
         }
 
-    # ── 可翻译段判定（送译/计数/回填三方共用） ──────────────
+    # ── Translatable-segment check (shared by send/count/backfill) ──
 
     @staticmethod
     def _translatable_segments(line_info: list) -> list:
-        """返回该行中【可翻译】的结构段列表。
+        """Return the list of translatable structure segments in this line.
 
-        判定与 _merge_chunks 的 has_content 一致：non-skip 且
-        (有 prefix/suffix 结构 或 body 非空白)。纯空白填充段
-        （无结构、body 空白，如缩进）不算——它们只是结构占位，
-        保留原 body、不送译、不消费译文行。
-        供 _text_split / translate / _merge_chunks 三方共用，
-        保证"送译段数 = 计数段数 = 回填段数"一一对应。
+        The check matches _merge_chunks' has_content: non-skip and
+        (has prefix/suffix structure or a non-blank body). Pure-whitespace filler
+        segments (no structure, blank body, e.g. indentation) do not count — they are
+        structural placeholders kept with their original body, not sent for
+        translation, and consume no translated lines. Shared by
+        _text_split / translate / _merge_chunks so that "translated segment count =
+        counted segment count = backfilled segment count" stays one-to-one.
         """
         return [
             si for si in line_info
@@ -220,7 +224,7 @@ class Translator(Executor):
             and (si.prefix or si.suffix or (si.body and si.body.strip()))
         ]
 
-    # ── Public API ───────────────────────────────────
+    # ── Public API ──
 
     def translate(self, text, trans_config, prompts, glossary=None,
                   splitter=None,
@@ -229,12 +233,13 @@ class Translator(Executor):
         """Unified translation entry point.
 
         With *splitter* → chunked translate → merge.
-        Without *splitter* (规则=无) → 用「直通 splitter」走同一分块路径：
-        不识别/跳过任何结构，仅按行 + token 预算分块——避免整段文本一次性
-        请求超出模型 context（如 llama -c 1024）导致 HTTP 400 翻译失败。
+        Without *splitter* (rules=off) → use a "passthrough splitter" to go through
+        the same chunking path: no structure is recognized/skipped, chunks are split
+        by line + token budget — avoiding a single request larger than the model
+        context (e.g. llama -c 1024) that would fail translation with HTTP 400.
         """
-        # 配置缺失（未选择/选了无效项）→ 显式报错而非底层 TypeError：
-        # 任务在队列中标记 FAILED，error 信息对用户可读。
+        # missing config (not selected / invalid item) → explicit error instead of a
+        # low-level TypeError: the task is marked FAILED in the queue with a readable error.
         if trans_config is None:
             raise ValueError("翻译参数配置未选择：任务 configs['translate_config'] 缺失或选了无效项")
         if prompts is None:
@@ -244,9 +249,10 @@ class Translator(Executor):
         if glossary:
             glossary = load_json_file(glossary)
 
-        # 规则=无：直通 splitter —— 空 prefix/suffix/skip/placeholder，
-        # 所有非空行都可翻译，_text_split 只按 max_token 分块、_merge_chunks
-        # 逐行回填，空行原样保留（与有规则路径完全一致）。
+        # rules=off: passthrough splitter — empty prefix/suffix/skip/placeholder,
+        # every non-empty line is translatable; _text_split chunks only by max_token,
+        # _merge_chunks backfills line by line, and empty lines are preserved
+        # (identical to the with-rules path).
         if splitter is None:
             splitter = RuleSplitter({
                 "prefix": [], "suffix": [], "skip": [], "placeholder": [],
@@ -260,7 +266,7 @@ class Translator(Executor):
             max_token, max_lines_per_chunk=max_lines_per_chunk,
         )
         if not chunks:
-            # splitter 无法产出任何 chunk（如空文本）→ 原样返回
+            # splitter produced no chunks (e.g. empty text) → return as-is
             return text or ""
 
         total = len(chunks)
@@ -272,12 +278,12 @@ class Translator(Executor):
             if cancel_event and cancel_event.is_set():
                 self._log("info", "[translate] 任务已取消，停止翻译")
                 break
-            # 暂停检查点：暂停期间阻塞等待，恢复后继续；取消则退出
+            # pause checkpoint: block while paused, continue after resume; exit on cancel
             if not _wait_paused(pause_event, cancel_event):
                 self._log("info", "[translate] 任务已取消，停止翻译")
                 break
             _glossary = self._match_glossary(chunk, glossary)
-            # 该 chunk 的可翻译段（送译/计数/回填三方一致）
+            # translatable segments of this chunk (consistent across send/count/backfill)
             segs = [
                 si for li in chunk_infos_list[i]
                 for si in self._translatable_segments(li)
@@ -287,7 +293,7 @@ class Translator(Executor):
             for attempt in range(self._translate_retries):
                 if cancel_event and cancel_event.is_set():
                     break
-                # 暂停检查点：暂停期间阻塞等待，恢复后继续；取消则退出
+                # pause checkpoint: block while paused, continue after resume; exit on cancel
                 if not _wait_paused(pause_event, cancel_event):
                     break
                 result = self._translate(
@@ -297,7 +303,8 @@ class Translator(Executor):
                 )
                 if result is not None:
                     break
-                # 取消导致的 None（_translate 内部已记录“任务已取消”）不应进入重试/误报
+                # a None caused by cancellation (already logged as "task cancelled"
+                # inside _translate) must not trigger retries/false alarms
                 if cancel_event and cancel_event.is_set():
                     break
                 if attempt < self._translate_retries - 1:
@@ -312,8 +319,10 @@ class Translator(Executor):
             else:
                 actual = len(result.split('\n'))
                 if actual != expected:
-                    # 译文行数不匹配（LLM 合并/拆行/漏行）→ 该块回退逐句：
-                    # 每段 body 单独送翻译、单独收译文，保证段级一一对应。
+                    # translated line count mismatch (LLM merged/split/dropped lines)
+                    # → fall back to per-sentence translation for this chunk: each
+                    # segment body is translated and received separately, guaranteeing
+                    # one-to-one segment correspondence.
                     self._log("warn", f"[translate] chunk {i + 1}/{total} 译文行数不匹配"
                               f"（期望 {expected}，实际 {actual}）→ 回退逐句翻译")
                     per_line = []
@@ -325,7 +334,7 @@ class Translator(Executor):
                             per_line.append(si.body)
                             continue
                         if not si.body:
-                            per_line.append("")  # 空 body 结构段无需翻译
+                            per_line.append("")  # structural segment with empty body needs no translation
                             continue
                         seg_result = self._translate(
                             si.body, trans_config, prompts, _glossary,
@@ -344,7 +353,7 @@ class Translator(Executor):
 
         return self._merge_chunks(splitter, chunk_infos_list[:len(_chunks)], _chunks)
 
-    # ── Subclass overrides ───────────────────────────
+    # ── Subclass overrides ──
 
     def _translate(self, text, trans_config, prompts, glossary=None,
                    timeout=None, cancel_event=None, pause_event=None):
@@ -357,10 +366,10 @@ class Translator(Executor):
         return max_token
 
     def _resolve_max_lines(self, max_lines, trans_config):
-        """解析每 chunk 的可翻译行数上限;基类不解析(仅 llama 子类读取 max_lines 词条)。"""
+        """Resolve the per-chunk translatable-line cap; the base class does not parse it (only the llama subclass reads the max_lines entry)."""
         return max_lines
 
-    # ── Prompt rendering ─────────────────────────────
+    # ── Prompt rendering ──
 
     def _render_glossary(self, glossary: dict | None) -> str:
         fmt = glossary["format"]
@@ -398,7 +407,7 @@ class Translator(Executor):
         ]
         return request_body
 
-    # ── Glossary matching ────────────────────────────
+    # ── Glossary matching ──
 
     def _match_glossary(self, text: str, glossary: dict | None) -> dict | None:
         """Filter glossary to entries actually present in *text*."""
@@ -417,7 +426,7 @@ class Translator(Executor):
             "entries": matched_entries,
         }
 
-    # ── Text chunking ────────────────────────────────
+    # ── Text chunking ──
 
     def _text_split(self, text, splitter: RuleSplitter, trans_config, prompts,
                     glossary=None, max_token=None, max_lines_per_chunk=None):
@@ -443,24 +452,28 @@ class Translator(Executor):
         for gi, li in enumerate(line_infos):
             if not li:
                 continue  # empty lines are never translated
-            # 段级分行拼接：同一源文件行内的多个可翻译段，body 各自占一行
-            # （'\n' 分隔）。LLM 输出译文时按行保持，merge 时逐行回填——
-            # 避免旧版 ''（无分隔）拼接导致 LLM 无法分辨
-            # 「\@ … ? … # … \@」等条件分支边界而把分支内容合并/错位。
-            # 空 body 的结构段（如全角空格行）产生空行，与 expected 计数一致。
+            # per-segment line joining: multiple translatable segments within one
+            # source line each occupy their own body line ('\n'-separated), so the
+            # LLM keeps translations line-aligned and merge backfills per line,
+            # preventing conditional-branch boundaries (e.g. 「\@ … ? … # … \@」)
+            # from being merged or misaligned.
+            # structural segments with empty body (e.g. full-width space lines)
+            # produce empty lines, consistent with the expected count.
             bodies = [si.body for si in self._translatable_segments(li)]
             if bodies:
                 translatable_lines.append('\n'.join(bodies))
                 translatable_to_global.append(gi)
 
         if not translatable_lines:
-            # 规则把全部内容判为 skip（如 ERB 模板规则误用于普通文本）：
-            # 回退为整段翻译——non-skip 单 segment 承载全文，merge 时整段译文回填；
-            # 空文本则返回空（调用方 translate() 兜底返回原文）
+            # rules mark everything as skip (e.g. an ERB template rule wrongly applied
+            # to plain text): fall back to whole-text translation — a single non-skip
+            # segment carries the full text and merge backfills the whole translation;
+            # empty text returns empty (translate() falls back to the original)
             if not text or not text.strip():
                 return [], []
-            # 整段回退：按原文行数构造 non-skip 行（译文逐行回填）。
-            # 返回单个 chunk（chunk = 行列表，行 = [SentenceInfo]）
+            # whole-text fallback: build non-skip lines matching the original line
+            # count (translation backfilled line by line).
+            # returns a single chunk (chunk = list of lines, line = [SentenceInfo])
             lines = text.split("\n")
             return [[[SentenceInfo(body=l)] for l in lines]], [text]
 
@@ -473,12 +486,14 @@ class Translator(Executor):
         chunk_line_infos_list = []
         chunk_texts_list = []
         chunk_start = 0          # index into translatable_lines
-        prev_end = 0             # 上一个 chunk 的全局行右边界（首个 chunk 从文件头 0 开始）
+        prev_end = 0             # global right boundary of the previous chunk (first chunk starts at file offset 0)
         i = 0
 
         def _global_end(idx: int) -> int:
-            """chunk 的全局行范围右边界：到下一个翻译行（含其间空行），
-            末尾则到文件末尾（含尾部空行），避免空行落在 chunk 边界外丢失。"""
+            """Global right boundary of a chunk's line range: up to the next translatable
+            line (including empty lines between), and to the end of the file at the tail
+            (including trailing empty lines), so empty lines are not dropped outside chunk
+            boundaries."""
             if idx < len(translatable_lines):
                 return translatable_to_global[idx]
             return len(line_infos)
@@ -499,9 +514,10 @@ class Translator(Executor):
             else:
                 if chunk_start < i:
                     # Build chunk covering global line range.
-                    # 左边界从 prev_end（首个 chunk 为 0）开始，而不是第一个
-                    # 可翻译行索引——否则文件头部（第一个可翻译行之前）的
-                    # skip/注释行落在所有 chunk 之外，合并重建时整段丢失。
+                    # The left boundary starts at prev_end (0 for the first chunk), not
+                    # at the first translatable-line index — otherwise skip/comment lines
+                    # at the file head (before the first translatable line) fall outside
+                    # every chunk and are lost when merging.
                     g_start = prev_end
                     g_end = _global_end(i)
                     chunk_line_infos_list.append(line_infos[g_start:g_end])
@@ -554,9 +570,12 @@ class Translator(Executor):
                 chunk_text = ""
             chunk_lines = chunk_text.split('\n')
 
-            # 消费单元占位：可翻译段 body + 全 skip 回退分支构造的"空行段"
-            # （无结构且 body 为空串，仅该分支产生，对应 chunk 文本空行）。
-            # 与 _text_split 送译段数一致，padding 按占位补原文。
+            # consumption-unit placeholders: translatable-segment body + "empty-line
+            # segments" built by the all-skip fallback branch (no structure and empty
+            # body; produced only by that branch, corresponding to blank lines in the
+            # chunk text).
+            # matches the translated-segment count in _text_split; padding fills in
+            # the original text via placeholders.
             chunk_infos = chunk_line_infos_list[chunk_idx]
             placeholders: list[str] = []
             for li in chunk_infos:
@@ -566,7 +585,7 @@ class Translator(Executor):
                 elif (li and len(li) == 1
                         and not li[0].prefix and not li[0].suffix
                         and li[0].body == ''):
-                    placeholders.append('')  # 空行段占位
+                    placeholders.append('')  # empty-line segment placeholder
             expected = len(placeholders)
             if len(chunk_lines) != expected:
                 self._log(
@@ -574,9 +593,11 @@ class Translator(Executor):
                     f"[translate] _merge_chunks: chunk #{chunk_idx} 行数不匹配——"
                     f"期望 {expected} 段, 实际 {len(chunk_lines)} 行",
                 )
-                # 防御：补原文占位 / 截断（正常路径 translate() 已保证匹配）。
-                # 多出时先吸收前导空行（模型额外输出的空行），再截断——
-                # 避免把末尾译文截掉导致后续消费单元错位。
+                # defensive: pad with original text / truncate (translate() already
+                # guarantees a match on the normal path).
+                # when there are extra lines, absorb leading empty lines (extra blank
+                # lines emitted by the model) before truncating — so the tail
+                # translation is not cut off and later consumption units stay aligned.
                 if len(chunk_lines) < expected:
                     missing_start = len(chunk_lines)
                     for j in range(missing_start, expected):
@@ -591,9 +612,11 @@ class Translator(Executor):
             all_translated_lines.extend(chunk_lines)
 
         # ── Rebuild: iterate line_infos, pull translated lines per segment ──
-        # 段级逐行回填：每个可翻译段消费一行译文赋给其 body；skip 段/纯空白
-        # 填充段/空行不消费译文行，整行原样保留。译文行空串时保留该段原文
-        # body（防模型漏译），结构（prefix/suffix）始终保留。
+        # per-segment line backfill: each translatable segment consumes one translated
+        # line into its body; skip / pure-whitespace filler / empty lines consume no
+        # translated lines and keep the whole line as-is. When a translated line is
+        # empty, the segment's original body is kept (guards against model omissions);
+        # structure (prefix/suffix) is always preserved.
         adjusted_line_infos = []
         ti = 0  # index into all_translated_lines
 
@@ -604,10 +627,13 @@ class Translator(Executor):
 
             segs = self._translatable_segments(line_info)
             if not segs:
-                # 无可翻译段行（skip 行/纯空白结构行）：整行保留原文。
-                # 空行段（全 skip 回退分支构造）仅在译文行为空串时消费，
-                # 保持空行语义且后续行不错位；译文行非空（模型合并掉空行）
-                # 时不消费，留给后续可翻译段。
+                # lines with no translatable segments (skip lines / pure-whitespace
+                # structural lines): the whole line keeps its original text.
+                # empty-line segments (built by the all-skip fallback branch) consume a
+                # translated line only when it is an empty string, preserving empty-line
+                # semantics without shifting later lines; when the translated line is
+                # non-empty (the model merged blank lines away) it is not consumed and
+                # is left for later translatable segments.
                 if (len(line_info) == 1
                         and not line_info[0].prefix and not line_info[0].suffix
                         and line_info[0].body == ''
@@ -626,15 +652,13 @@ class Translator(Executor):
                 ti += 1
                 if translated_line:
                     si.body = translated_line
-                # 译空 → 保留原文 body（防漏译），结构 prefix/suffix 不变
+                # empty translation → keep original body (guards against omission); prefix/suffix structure unchanged
             adjusted_line_infos.append(line_info)
 
         return splitter.merge(adjusted_line_infos)
 
 
-# ═══════════════════════════════════════════════════════════
-# LlamaTranslator — local llama-server
-# ═══════════════════════════════════════════════════════════
+# ── LlamaTranslator — local llama-server ──
 
 class LlamaTranslator(Translator):
     """Translator backed by a local llama-server process."""
@@ -656,7 +680,7 @@ class LlamaTranslator(Translator):
         return int(ratio * self._context_size)
 
     def _resolve_max_lines(self, max_lines, trans_config):
-        """仅 llama 后端解析 trans_config 的 max_lines 词条(正整数生效;其余 None)。"""
+        """Only the llama backend parses the max_lines entry in trans_config (positive int applies; otherwise None)."""
         if max_lines is not None:
             return max_lines
         value = trans_config.get("max_lines")
@@ -670,8 +694,9 @@ class LlamaTranslator(Translator):
         try:
             self._wait_for_preparing()
             url = self.base_url + "/tokenize"
-            # 统计全部消息（system + user，含术语表渲染）的 content 拼接长度；
-            # 只统计 user 消息会低估实际输入 token，chunk 预算偏松
+            # count the concatenated content length of all messages (system + user,
+            # including rendered glossary); counting only the user message would
+            # underestimate actual input tokens and loosen the chunk budget
             body = {"content": "\n".join(
                 m.get("content", "") for m in request_body["messages"]
             )}
@@ -711,12 +736,14 @@ class LlamaTranslator(Translator):
 
     def _translate(self, text, trans_config, prompts, glossary=None,
                    timeout=None, cancel_event=None, pause_event=None):
-        """流式翻译：请求在后台线程执行，主线程轮询暂停/取消，可即时中断。
+        """Streaming translation: the request runs on a background thread while the
+        main thread polls pause/cancel for prompt interruption.
 
-        requests 的 ``iter_lines`` 是阻塞读：若把请求放在主线程，模型卡住时
-        cancel/pause 检查点要等下一个 token 才生效，任务可能永久挂起。因此
-        这里把 POST + SSE 解析放进 daemon 子线程，主线程轮询事件，取消/暂停
-        时通过 ``response.close()`` 打断子线程的阻塞读取并 join 回收。
+        requests' ``iter_lines`` is a blocking read: if the request ran on the main
+        thread, a stuck model would only reach cancel/pause checkpoints at the next
+        token, so the task could hang forever. Therefore the POST + SSE parsing runs on
+        a daemon child thread; the main thread polls events and, on cancel/pause,
+        breaks the child thread's blocking read via ``response.close()`` then joins it.
         """
         import requests
 
@@ -725,8 +752,9 @@ class LlamaTranslator(Translator):
             self._wait_for_preparing()
             url = self.base_url + "/v1/chat/completions"
             request_body = self.render_prompt(text, trans_config, prompts, glossary)
-            # 流式强制开启：token 间暂停/取消检查点依赖 SSE 逐块到达
-            # （args 配置里的 stream 字段因此是死配置，已从 default.json 移除）
+            # streaming is forced on: pause/cancel checkpoints between tokens rely on
+            # SSE chunks arriving (so the stream field in args config is dead config,
+            # already removed from default.json)
             request_body["stream"] = True
         except Exception:
             return None
@@ -741,8 +769,9 @@ class LlamaTranslator(Translator):
                 with requests.post(url, json=request_body, timeout=_timeout, stream=True) as response:
                     response_holder["response"] = response
                     response.raise_for_status()
-                    # 显式 UTF-8 解码：SSE 响应常无 charset（requests 会退化为
-                    # latin-1/bytes），必须按 UTF-8 解码行字节，否则中文 token 变乱码
+                    # explicit UTF-8 decoding: SSE responses often lack a charset
+                    # (requests falls back to latin-1/bytes); line bytes must be decoded
+                    # as UTF-8 or CJK tokens become garbled
                     for raw in response.iter_lines(decode_unicode=False):
                         if not raw:
                             continue
@@ -757,7 +786,7 @@ class LlamaTranslator(Translator):
                                 continue
                             if delta:
                                 parts.append(delta)
-            except Exception as e:  # 含 Timeout/ConnectionError/HTTPError/RequestException
+            except Exception as e:  # includes Timeout/ConnectionError/HTTPError/RequestException
                 errors.append(e)
             finally:
                 done.set()
@@ -765,7 +794,8 @@ class LlamaTranslator(Translator):
         t = threading.Thread(target=_stream, daemon=True)
         t.start()
 
-        # 主线程轮询暂停/取消；触发时关闭连接打断子线程读取，join 后返回 None
+        # main thread polls pause/cancel; on trigger, close the connection to interrupt
+        # the child thread's read, join, then return None
         while not done.is_set():
             if not _wait_paused(pause_event, cancel_event):
                 self._log("info", "[LlamaTranslator] 任务已取消，停止请求")
@@ -793,9 +823,7 @@ class LlamaTranslator(Translator):
         return "".join(parts).strip()
 
 
-# ═══════════════════════════════════════════════════════════
-# APITranslator — OpenAI-compatible cloud API
-# ═══════════════════════════════════════════════════════════
+# ── APITranslator — OpenAI-compatible cloud API ──
 
 class APITranslator(Translator):
     """Translator backed by an OpenAI-compatible cloud API."""
@@ -806,15 +834,15 @@ class APITranslator(Translator):
         self.model = self.config.get("model", "gpt-4o")
         self.timeout = self.config.get("timeout", 120)
         self._api_key = self.config.get("api_key", "")
-        self._client = None                     # 懒创建 openai SDK client
-        self._connection_checked = False        # 首次翻译前懒检测一次连通性
+        self._client = None                     # lazily-created openai SDK client
+        self._connection_checked = False        # lazily check connectivity once before the first translation
 
     @staticmethod
     def _normalize_base_url(base_url: str) -> str:
-        """规范化 base_url 供 openai SDK 使用：去尾斜杠，补 /v1 后缀（SDK 2.x 不自动补）。
+        """Normalize base_url for the openai SDK: strip trailing slash, append /v1 (SDK 2.x does not do this automatically).
 
         - ``https://host``    → ``https://host/v1``
-        - ``https://host/v1`` → ``https://host/v1``（不重复）
+        - ``https://host/v1`` → ``https://host/v1`` (no duplication)
         """
         base = (base_url or "").rstrip("/")
         if base.endswith("/v1"):
@@ -822,7 +850,7 @@ class APITranslator(Translator):
         return base + "/v1"
 
     def _get_client(self, timeout: Optional[float] = None):
-        """懒创建 openai SDK client（一次创建复用）。"""
+        """Lazily create the openai SDK client (created once, reused)."""
         if self._client is None:
             from openai import OpenAI
             self._client = OpenAI(
@@ -834,7 +862,7 @@ class APITranslator(Translator):
         return self._client
 
     def check_connection(self, timeout: float = 10.0):
-        """检测 API 连通性 + 模型名校验（openai SDK /models 列表）。
+        """Check API connectivity + validate the model name (openai SDK /models list).
 
         Returns: (ok: bool, message: str)
         """
@@ -859,7 +887,7 @@ class APITranslator(Translator):
             return False, f"HTTP {e.status_code}：{e}"
         except openai.OpenAIError as e:
             return False, f"请求异常：{e}"
-        # 模型名校验（列表格式宽容：解析失败不误报）
+        # model-name validation (lenient list format: parse failure is not reported as an error)
         try:
             ids = [getattr(m, "id", None) or getattr(m, "model", None) for m in models.data]
             ids = [str(i) for i in ids if i]
@@ -876,7 +904,7 @@ class APITranslator(Translator):
         if not self._api_key or self._api_key == "YOUR_API_KEY_HERE":
             self._log("error", "[APITranslator] API Key 未配置")
             return None
-        # 首次翻译前懒检测一次连通性（启动检测已置位则跳过）
+        # lazily check connectivity once before the first translation (skipped if the startup check already ran)
         if not self._connection_checked:
             ok, msg = self.check_connection(timeout=10)
             self._connection_checked = True
@@ -885,7 +913,8 @@ class APITranslator(Translator):
                 return None
 
         request_body = self.render_prompt(text, trans_config, prompts, glossary)
-        # 参数白名单：仅传 OpenAI 兼容参数（SDK 严格校验，剥离 llama 特有 repeat_penalty 等）
+        # parameter whitelist: pass only OpenAI-compatible params (SDK validates strictly;
+        # strips llama-specific ones like repeat_penalty)
         kwargs = {
             "model": self.model,
             "messages": request_body["messages"],
@@ -905,7 +934,7 @@ class APITranslator(Translator):
             stream = self._get_client(timeout=_timeout).chat.completions.create(**kwargs)
             parts = []
             for chunk in stream:
-                # 暂停/取消检查点（token 生成期间生效）
+                # pause/cancel checkpoint (active during token generation)
                 if not _wait_paused(pause_event, cancel_event):
                     self._log("info", "[APITranslator] 任务已取消，停止请求")
                     return None
@@ -935,65 +964,68 @@ class APITranslator(Translator):
             return None
 
 
-# ═══════════════════════════════════════════════════════════
-# GsvTTSExecutor — GPT-SoVITS 文本合成（三方案情绪复刻）
-# ═══════════════════════════════════════════════════════════
+# ── GsvTTSExecutor — GPT-SoVITS TTS (three-mode emotion replication) ──
 
 class GsvTTSExecutor(Executor):
-    """GPT-SoVITS 文本合成执行器（包装 ``core/gsv.GsvEngine``）。
+    """GPT-SoVITS text-to-speech executor (wraps ``core/gsv.GsvEngine``).
 
-    任务契约（与 docs/plan-gsv-service-executor.md §4 一致）::
+    Task contract (matches docs/plan-gsv-service-executor.md §4)::
 
-        task.file_path          目标文本（直接字符串 / .txt 路径 / 含 "text" 键的 JSON）
-        task.configs["args"]    合成参数（JSON 文件路径 → dict，或直接 dict）:
-            ref_mode            "default"|"aux"|"dual"（默认 default）
-            ref_audio_path      参考音频（主参考; default/aux/dual 必填，default 单参考）
-            prompt_text         参考文本（default 可选，空 = ref_free; aux/dual 必填; v4 必填）
-            prompt_lang         参考语种（默认 ja）
-            role_ref_audio      角色参考音频（音色锚定; aux/dual 必填）
-            text_lang           目标语种（默认 zh）
-            + 白名单合成参数（top_k/top_p/temperature/... 见 ``_SYNTH_KEYS``）
+        task.file_path          target text (plain string / .txt path / JSON containing a "text" key)
+        task.configs["args"]    synth args (JSON file path → dict, or a direct dict):
+            ref_mode            "default"|"aux"|"dual" (default: default)
+            ref_audio_path      reference audio (emotion reference; required for default/aux/dual; single ref for default)
+            prompt_text         reference text (optional for default, empty = ref_free; required for aux/dual; required for v4)
+            prompt_lang         reference language (default: ja)
+            role_ref_audio      role reference audio (timbre anchor; required for aux/dual)
+            text_lang           target language (default: zh)
+            + whitelisted synth args (top_k/top_p/temperature/... see ``_SYNTH_KEYS``)
 
-    三方案分发（引擎零改动）: default/aux → ``engine.synth_stream``（aux 附加
-    ``aux_ref_audio_paths=[role_ref]``）; dual → ``engine.synth_cross_speaker``
-    （情绪音频 → S1 语义、角色音频 → S2 谱/SV 的 prompt_cache 编排）。
+    Three-mode dispatch (engine unchanged): default/aux → ``engine.synth_stream``
+    (aux additionally passes ``aux_ref_audio_paths=[role_ref]``); dual →
+    ``engine.synth_cross_speaker`` (emotion audio → S1 semantics, role audio → S2
+    spectrogram/SV prompt_cache orchestration).
 
-    自适应重试（双向，互素步长）: 目标文本与参考文本相同/高度相似时，
-    repetition_penalty 会压制与参考语义重复的 token，导致 S1 提前 EOS、
-    输出只剩约 40% 时长（后半段消失）；反之 RP 过低时模型复读/续写不停，
-    生成冲到 vendor 上限（``early_stop_num = hz×max_sec``，本机 60s）。
-    合成完成后：
-    - 输出时长 < 情绪参考时长×``min_ref_ratio``（默认 0.6）→ 判定过短
-      （提前 EOS）→ **下调** repetition_penalty 0.05 重试；
-    - 输出时长 > 情绪参考时长×``dur_cap_ratio``（默认 2.0）→ 判定生成失控
-      （目标≈参考续写）→ **上调** repetition_penalty 0.03 重试。
-    升降步长 0.05/0.03 互素（gcd=0.01），配合 ``visited`` 去重可遍历
-    ``[rp_floor, rp_ceil]=[0.75, 2.25]`` 区间内的全部 0.01 网格点，不会
-    被困在单一方向的边界死路；重试上限 ``max_retries``（默认 12）。
-    阈值/步长/边界均可用 args 覆盖（不进引擎白名单）；参考时长探测失败
-    时跳过自适应。
+    Adaptive retry (bidirectional, coprime step sizes): when the target text equals or
+    closely resembles the reference text, repetition_penalty suppresses tokens
+    semantically duplicating the reference, causing S1 to EOS early and output only
+    ~40% of the duration (the tail disappears); conversely, when RP is too low the
+    model keeps repeating/continuing, and generation runs into the vendor limit
+    (``early_stop_num = hz×max_sec``, 60s on this machine). After synthesis:
+    - output duration < emotion ref duration×``min_ref_ratio`` (default 0.6)
+      → judged too short (early EOS) → **lower** repetition_penalty by 0.05 and retry;
+    - output duration > emotion ref duration×``dur_cap_ratio`` (default 2.0)
+      → judged runaway generation (target ≈ continuation of reference)
+      → **raise** repetition_penalty by 0.03 and retry.
+    The step sizes 0.05/0.03 are coprime (gcd=0.01); together with ``visited`` dedup
+    they traverse every 0.01 grid point in ``[rp_floor, rp_ceil]=[0.75, 2.25]``, so
+    the search is never stuck on a dead end in a single direction; retry cap is
+    ``max_retries`` (default 12). Thresholds/step sizes/bounds can all be overridden
+    via args (not part of the engine whitelist); if reference-duration probing fails,
+    adaptation is skipped.
 
-    取消/暂停检查点插在每片段 yield 后（片段级粒度，与转写队列一致）; 取消 =
-    ``engine.stop()`` + ``CancelledError``，无残留推理。
+    Cancel/pause checkpoints are inserted after each fragment yield (fragment-level
+    granularity, consistent with the transcription queue); cancel =
+    ``engine.stop()`` + ``CancelledError``, with no leftover inference.
     """
 
     REF_MODES = ("default", "aux", "dual")
 
-    # 白名单合成参数（透传 GsvEngine; 未知键静默忽略，避免引擎 TypeError）
+    # whitelisted synth args (passed through to GsvEngine; unknown keys silently ignored to avoid engine TypeError)
     _SYNTH_KEYS = (
         "top_k", "top_p", "temperature", "repetition_penalty", "speed_factor",
         "sample_steps", "text_split_method", "seed", "batch_size",
         "parallel_infer", "super_sampling", "split_bucket", "fragment_interval",
     )
 
-    # ── 自适应重试参数（双向，互素步长）──
-    _MIN_REF_RATIO = 0.6   # 输出 < 参考×此比例 → 过短（提前 EOS）→ 降 RP
-    _MAX_REF_RATIO = 2.0   # 输出 > 参考×此比例 → 过长（生成失控续写）→ 升 RP
-    _RP_STEP_DOWN = 0.05   # 降 RP 步长（过短）
-    _RP_STEP_UP = 0.03     # 升 RP 步长（过长；与 _RP_STEP_DOWN 互素 → 0.01 粒度覆盖区间）
-    _RP_FLOOR = 0.75       # rp 下限
-    _RP_CEIL = 2.25        # rp 上限
-    _MAX_RETRIES = 12      # 双向搜索最多尝试次数
+    # ── Adaptive retry params (bidirectional, coprime steps) ──
+    _MIN_REF_RATIO = 0.6   # output < ref×this ratio → too short (early EOS) → lower RP
+    _MAX_REF_RATIO = 2.0   # output > ref×this ratio → too long (runaway continuation) → raise RP
+    _RP_STEP_DOWN = 0.05   # RP step down (too short)
+    _RP_STEP_UP = 0.03     # RP step up (too long; coprime with _RP_STEP_DOWN → 0.01 grid covers the range)
+    _RP_FLOOR = 0.75       # rp lower bound
+    _RP_CEIL = 2.25        # rp upper bound
+    _MAX_RETRIES = 12      # max attempts for the bidirectional search
 
     def __init__(self, engine, defaults: Optional[dict] = None):
         self.engine = engine
@@ -1001,10 +1033,11 @@ class GsvTTSExecutor(Executor):
 
     @staticmethod
     def _check_ref_duration(path: str, label: str) -> None:
-        """3~10s 参考时长预校验（锁外执行，防触发 run() 内部自动重载）。
+        """Pre-validate the 3–10s reference duration (run outside the lock to avoid triggering run()'s internal auto-reload).
 
-        只读元数据不加载波形; 读取失败（如 mp3）时跳过，由引擎侧 3~10s
-        硬校验兜底（vendored TTS.py:814-816 同款）。
+        Reads metadata only, without loading waveforms; skips on read failure (e.g. mp3),
+        relying on the engine's 3–10s hard validation as a fallback (same as vendored
+        TTS.py:814-816).
         """
         try:
             import soundfile
@@ -1018,10 +1051,11 @@ class GsvTTSExecutor(Executor):
 
     @staticmethod
     def _probe_ref_duration(path: str) -> Optional[float]:
-        """探测情绪参考音频时长（自适应重试判定基准）。
+        """Probe the emotion reference audio duration (baseline for adaptive-retry decisions).
 
-        路径为空或探测失败（个别格式 soundfile 不支持）返回 None ——
-        自适应过短检测跳过，保持原行为。
+        Returns None when the path is empty or probing fails (some formats are not
+        supported by soundfile) — the adaptive too-short check is skipped, preserving
+        original behavior.
         """
         if not path:
             return None
@@ -1041,12 +1075,12 @@ class GsvTTSExecutor(Executor):
     ) -> dict:
         import numpy as np
 
-        cfg = self._resolve_task(task)  # (source, configs) 多格式解析
+        cfg = self._resolve_task(task)  # multi-format resolution into (source, configs)
         source, configs = cfg
         args = {**self.defaults, **dict(configs.get("args") or {})}
         pause_event = getattr(task, "_pause_event", None)
 
-        # ── 文本: args["text"] 优先，否则 file_path（字符串文本 / .txt 内容 / JSON 的 "text" 键）
+        # ── Text: args["text"] takes precedence, else file_path (string text / .txt content / JSON "text" key) ──
         text = args.pop("text", None)
         if text is None:
             if isinstance(source, dict):
@@ -1056,7 +1090,7 @@ class GsvTTSExecutor(Executor):
         if not text or not text.strip():
             raise ValueError("目标文本为空（请通过 file_path 提供文本或设置 args['text']）")
 
-        # ── 预校验（锁外，防触发 run() 内部昂贵的自动重载）─────────
+        # ── Pre-validation (outside the lock, avoiding run()'s expensive auto-reload) ──
         ref_mode = args.get("ref_mode", "default")
         if ref_mode not in self.REF_MODES:
             raise ValueError(f"未知 ref_mode: {ref_mode!r}（可选: {', '.join(self.REF_MODES)}）")
@@ -1075,25 +1109,26 @@ class GsvTTSExecutor(Executor):
         if self.engine.version in ("v3", "v4") and not prompt_text.strip():
             raise ValueError("v3/v4 版本要求 prompt_text（参考文本）")
 
-        # ── 三方案分发（均流式，便于片段级进度/取消）───────────────
+        # ── Three-mode dispatch (all streaming, for fragment-level progress/cancel) ──
         text_lang = args.get("text_lang", "zh")
         prompt_lang = args.get("prompt_lang", "ja")
         synth_params = {k: v for k, v in args.items() if k in self._SYNTH_KEYS}
 
-        # ── 自适应重试（双向）：过短→降 RP；过长（失控续写）→升 RP ──
-        # default 模式：合成（推理）时长由目标文本决定，不要求与参考音频
-        # 长度成比例，故不做比例锚定（ref_dur=None 跳过双向判定，不重试）
+        # ── Adaptive retry (bidirectional): too short → lower RP; too long (runaway) → raise RP ──
+        # default mode: synthesis (inference) duration is determined by the target text
+        # and need not be proportional to reference audio length, so no ratio anchoring
+        # is done (ref_dur=None skips the bidirectional check, no retry)
         ref_dur = None if ref_mode == "default" else self._probe_ref_duration(ref_audio)
         min_ratio = float(args.get("min_ref_ratio", self._MIN_REF_RATIO))
         max_ratio = float(args.get("dur_cap_ratio", self._MAX_REF_RATIO))
         max_retries = int(args.get("max_retries", self._MAX_RETRIES))
         rp = float(synth_params.get("repetition_penalty", 1.35))
         retries = 0
-        visited = {rp}   # 已试过的 rp 值：互素步长保证网格全覆盖，重复尝试无意义
+        visited = {rp}   # tried rp values: coprime steps guarantee full grid coverage, so repeats are pointless
         fragments: list[np.ndarray] = []
         sr = None
-        frag_total = 0        # 全局累计片段数（重试不重置 → 进度回调单调不减）
-        total = max(1, (len(text) + 9) // 10)  # 启发式预估片段数（句级切分，非精确）
+        frag_total = 0        # global fragment counter (not reset on retry → progress callback is monotonic)
+        total = max(1, (len(text) + 9) // 10)  # heuristic fragment estimate (sentence-level split, not exact)
         t0 = time.time()
         while True:
             if ref_mode == "dual":
@@ -1113,7 +1148,7 @@ class GsvTTSExecutor(Executor):
                     **synth_params,
                 )
 
-            # ── 流式消费（片段级进度/取消检查点）──────────────────
+            # ── Stream consumption (fragment-level progress/cancel checkpoints) ──
             try:
                 for _i, (_sr, frag) in enumerate(gen):
                     if not _wait_paused(pause_event, cancel_event):
@@ -1131,9 +1166,9 @@ class GsvTTSExecutor(Executor):
                             {"fragment": frag_total, "attempt": retries + 1},
                         )
             finally:
-                gen.close()  # 触发 vendor 端 empty_cache（TTS.py:1527-1528）
+                gen.close()  # triggers vendor-side empty_cache (TTS.py:1527-1528)
 
-            # ── 双向判定：过短降 RP；过长（失控）升 RP ──
+            # ── Bidirectional decision: too short → lower RP; too long (runaway) → raise RP ──
             dur = (sum(len(f) for f in fragments) / sr) if (sr and fragments) else 0.0
             too_short = ref_dur is not None and dur < ref_dur * min_ratio
             too_long = ref_dur is not None and dur > ref_dur * max_ratio
@@ -1150,9 +1185,9 @@ class GsvTTSExecutor(Executor):
                 ratio = max_ratio
                 cmp = ">"
             else:
-                break  # 已到边界仍异常 → 接受当前结果（评估侧报警）
+                break  # still anomalous at the bound → accept current result (alarm on the evaluation side)
             if new_rp in visited:
-                break  # 该 rp 值已试过仍异常，停止（防死循环）
+                break  # this rp value was already tried and still anomalous; stop (prevents infinite loop)
             visited.add(new_rp)
             self._log(
                 "warn",
@@ -1167,7 +1202,7 @@ class GsvTTSExecutor(Executor):
         if sr is None or not fragments:
             raise RuntimeError("合成未产出任何音频片段")
 
-        # ── 输出: output/gsv/{task_id}.wav ───────────────────────
+        # ── Output: output/gsv/{task_id}.wav ──
         from app.paths import project_root
 
         audio = np.concatenate(fragments)
@@ -1192,9 +1227,9 @@ class GsvTTSExecutor(Executor):
         }
 
 
-# ── 模块级惰性属性（PEP 562）──────────────────────────────────
-# 保持 core.executor.requests / core.executor.openai 旧有访问方式可用
-# （tests 与旧代码 monkeypatch 依赖该路径）。首次访问时导入真实模块并缓存。
+# ── Module-level lazy attributes (PEP 562) ──
+# core.executor.requests / core.executor.openai remain reachable (tests monkeypatch
+# this path). First access imports the real module and caches it.
 
 def __getattr__(name):
     if name in ("requests", "openai"):

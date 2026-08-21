@@ -1,41 +1,40 @@
-# ============================================================
-# ModularTranslator 运行依赖清单（app_lite / app_workflow 通用）
+# ── ModularTranslator runtime dependency manifest (shared by app_lite / app_workflow) ──
 #
-# 策略：直接依赖固定版本（版本取自源仓库 .venv 实测），传递依赖由 pip 自动解析。
-# 来源：源码 import 扫描（app/core/ui 非 vendor）+ dependencies/requirements/*.txt
-#       + PACKAGING.md §6.1 + install-gsv.sh
+# Strategy: pin direct dependencies to fixed versions (taken from the source repo's
+# .venv measurements); transitive dependencies are resolved by pip.
+# Sources: source import scan (app/core/ui, non-vendor) + dependencies/requirements/*.txt
+#          + PACKAGING.md §6.1 + install-gsv.sh
 #
-# 特殊项（不可直接 pip install -r 安装，见文末说明）：
-#   - torch / torchaudio   （需 --index-url 指定 CPU 或 cu128 变体）
-#   - moss-transcribe-diarize（本地源码包，位于 dependencies/MOSS-Transcribe-Diarize）
-# ============================================================
+# Special items (cannot be installed directly via pip install -r; see notes at the end):
+#   - torch / torchaudio   (requires --index-url to pick the CPU or cu128 variant)
+#   - moss-transcribe-diarize (local source package at dependencies/MOSS-Transcribe-Diarize)
 
-# ---- 应用框架 / 运行时 ----
-flet==0.86.2                # UI 框架
-flet-desktop==0.86.2        # 桌面运行引擎（flet 桌面版必需）
-loguru==0.7.3               # 日志（app/log.py）
-requests==2.34.2            # MOSS 子进程/网络（core/moss/moss_subprocess.py）
+# ── App framework / runtime ──
+flet==0.86.2                # UI framework
+flet-desktop==0.86.2        # desktop runtime engine (required by the flet desktop edition)
+loguru==0.7.3               # logging (app/log.py)
+requests==2.34.2            # MOSS subprocess/network (core/moss/moss_subprocess.py)
 
-# ---- 推理核心 ----
+# ── Inference core ──
 numpy==2.5.2                # core/gsv/engine.py
-transformers==5.15.0        # MOSS streamer（core/moss/streaming_runner.py）
-faster-whisper==1.2.1       # 转写引擎（core/executor 链；onnxruntime VAD 由其自动带入）
-soundfile==0.14.0           # GSV 参考音频时长预校验
-openai==3.1.0               # 翻译后端（openai 兼容 API）
+transformers==5.15.0        # MOSS streamer (core/moss/streaming_runner.py)
+faster-whisper==1.2.1       # transcription engine (core/executor chain; onnxruntime VAD pulled in automatically)
+soundfile==0.14.0           # GSV reference-audio duration precheck
+openai==3.1.0               # translation backend (openai-compatible API)
 
-# ---- GSV 引擎核心（dependencies/requirements/gsv-core.txt）----
+# ── GSV engine core (dependencies/requirements/gsv-core.txt) ──
 ffmpeg-python==0.2.0
 librosa==1.0.0
 PyYAML==6.0.3
 tqdm==4.70.0
-matplotlib==3.11.1          # AR/modules/lr_schedulers.py 硬依赖
+matplotlib==3.11.1          # hard dependency of AR/modules/lr_schedulers.py
 
-# ---- GSV 模型层（dependencies/requirements/gsv-model.txt）----
+# ── GSV model layer (dependencies/requirements/gsv-model.txt) ──
 peft==0.20.0
 pytorch-lightning==2.6.5
-x-transformers==2.25.5      # f5_tts DiT 依赖链（x_transformers → einx → einops）
+x-transformers==2.25.5      # f5_tts DiT dependency chain (x_transformers → einx → einops)
 
-# ---- GSV 文本/G2P（dependencies/requirements/gsv-text.txt）----
+# ── GSV text/G2P (dependencies/requirements/gsv-text.txt) ──
 jieba==0.42.1
 jieba-fast==0.53
 cn2an==0.5.24
@@ -44,33 +43,33 @@ opencc-python-reimplemented==0.1.7
 fast-langdetect==1.0.1
 split-lang==2.1.1
 g2p-en==2.1.0
-pyopenjtalk==0.4.1         # 日语 G2P
-wordsegment                # 英语 G2P 分词（当前 .venv 未安装，遇 [normal1] 标记文本才需要）
+pyopenjtalk==0.4.1         # Japanese G2P
+wordsegment                # English G2P tokenization (not installed in the current .venv; only needed for [normal1]-tagged text)
 
-# ---- 其他 ----
-nltk==3.10.3                # g2p_en 依赖 + core/gsv/setup_nltk_data.py
-# nltk 数据（英语 G2P 必需；zh/ja 可跳过）：
+# ── Other ──
+nltk==3.10.3                # g2p_en dependency + core/gsv/setup_nltk_data.py
+# nltk data (required for English G2P; can be skipped for zh/ja):
 #   python -m core.gsv.setup_nltk_data
 
-# ============================================================
-# 特殊安装项（不能直接 pip install -r 安装）
-# ============================================================
+# ── Special install items (cannot be installed via pip install -r) ──
 
-# 1) torch / torchaudio —— 需按硬件选择变体：
-#    CPU 版（无 GPU 机器）：
+# 1) torch / torchaudio — choose a variant by hardware:
+#    CPU build (machines without a GPU):
 #      pip install torch==2.11.0+cpu torchaudio==2.11.0+cpu \
 #        --index-url https://download.pytorch.org/whl/cpu
-#    GPU cu128 版（NVIDIA + CUDA 12.8）：
+#    GPU cu128 build (NVIDIA + CUDA 12.8):
 #      pip install torch==2.11.0+cu128 torchaudio==2.11.0+cu128 \
 #        --index-url https://download.pytorch.org/whl/cu128
-#    GPU cu128 版 —— 阿里云镜像源（国内加速；注意必须用 --find-links 而非 --index-url：
-#    该镜像是 flat 文件列表，非 PEP 503 索引，--index-url 会报 versions: none。
-#    已验证包含 torch-2.11.0+cu128-cp314-cp314-win_amd64.whl）：
+#    GPU cu128 build — Aliyun mirror (faster in China; note you MUST use
+#    --find-links rather than --index-url: this mirror is a flat file list, not a
+#    PEP 503 index, and --index-url would report "versions: none". Verified to
+#    contain torch-2.11.0+cu128-cp314-cp314-win_amd64.whl):
 #      pip install torch==2.11.0+cu128 torchaudio==2.11.0+cu128 \
 #        --find-links https://mirrors.aliyun.com/pytorch-wheels/cu128
-#    运行时由 app/torch_runtime.py 自动选择（探测 GPU → CUDA，否则 CPU）。
+#    Selected automatically at runtime by app/torch_runtime.py (GPU detected → CUDA, else CPU).
 
-# 2) moss-transcribe-diarize==0.1.0 —— 本地源码包（不在 PyPI）：
+# 2) moss-transcribe-diarize==0.1.0 — local source package (not on PyPI):
 #      pip install -e dependencies/MOSS-Transcribe-Diarize
-#    （或 cd 到该目录后 pip install -e .；其传递依赖 av/fastapi/librosa/numba/
-#     safetensors/soxr/uvicorn 等由 pip 自动解析）
+#    (or cd into that directory and run pip install -e .; its transitive
+#    dependencies av/fastapi/librosa/numba/safetensors/soxr/uvicorn etc. are
+#    resolved automatically by pip)

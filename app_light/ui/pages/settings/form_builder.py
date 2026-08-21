@@ -1,12 +1,12 @@
-"""设置页表单渲染引擎 — 基于声明式 schema 渲染分组强类型表单。
+"""Settings page form rendering engine — renders grouped strongly-typed forms from a declarative schema.
 
-- 按 ``ConfigType.groups`` 渲染分组标题。
-- 每类字段一个渲染分支：
-    boolean → Switch；select → Dropdown；secret → 可揭示密码框；
-    browse=file/directory → TextField + 浏览按钮（``on_browse(field, ref)`` 注入）；
-    multiline / list / object / json → 多行框；integer / number → 数字键盘；其余单行。
-- 错误就地显示：错误文本直接放在字段行内（不重建整棵树、不丢焦点）。
-- ``field.width`` 显式指定时生效（否则 expand 撑满输入列）。
+- Renders group titles from ``ConfigType.groups``.
+- One render branch per field type:
+    boolean → Switch; select → Dropdown; secret → revealable password field;
+    browse=file/directory → TextField + browse button (``on_browse(field, ref)`` injected);
+    multiline / list / object / json → multiline field; integer / number → numeric keyboard; others single-line.
+- Errors shown in place: error text sits directly in the field row (no full-tree rebuild, no focus loss).
+- ``field.width`` takes effect when explicitly given (otherwise expand fills the input column).
 """
 
 import flet as ft
@@ -15,7 +15,7 @@ from ui.theme import Layout, Palette, Radius
 from ui.pages.settings.config_schema import ConfigType, Field, FieldGroup
 from ui.widgets.config_picker import _scan_config_dir, _option_for
 
-# ── 响应式列宽 ──
+# ── Responsive column widths ──
 LABEL_COL = {"sm": 12, "md": 3}
 INPUT_COL = {"sm": 12, "md": 9}
 
@@ -78,7 +78,7 @@ def _group_header(group: FieldGroup, is_first: bool) -> ft.Column:
 
 
 def _visible(field: Field, values: dict | None) -> bool:
-    """按 ``field.visible_when``（{key: 值} 全匹配）判断字段是否渲染。"""
+    """Determine whether a field renders per ``field.visible_when`` (all {key: value} must match)."""
     if not field.visible_when:
         return True
     for k, v in field.visible_when.items():
@@ -115,10 +115,10 @@ def _build_field(field: Field, refs: dict, errors: list,
             width=field.width,
             expand=field.width is None,
         )
-        # 选项来源：field.options（str 或 (key,text) 元组）+ 惰性 options_provider
-        #           + scan_config_type 目录扫描（"默认加载项"选择）
+        # Option sources: field.options (str or (key,text) tuples) + lazy options_provider
+        #                 + scan_config_type directory scan (for "default selection" pickers)
         def _mk_option(o):
-            """str → Option(key=text)；两元组 → 显示名与值分离（如「自动检测（留空）」）。"""
+            """str → Option(key=text); two-tuple → display name and value separated (e.g. "Auto-detect (blank)")."""
             if isinstance(o, (tuple, list)) and len(o) == 2:
                 return ft.dropdown.Option(key=str(o[0]), text=str(o[1]))
             return ft.dropdown.Option(str(o))
@@ -130,7 +130,8 @@ def _build_field(field: Field, refs: dict, errors: list,
             opts += [_option_for(p.name) for p in _scan_config_dir(
                 field.scan_config_type, getattr(field, "scan_glob", "*.json"))]
         init_val = str(init) if init is not None else ""
-        # 初始值不在选项中时回退首项（如旧配置语言代码不在列表 → 回退「自动检测」）
+        # If the initial value is not in the options, fall back to the first (e.g. an old
+        # config's language code not in the list → fall back to "Auto-detect")
         if init_val and init_val not in [o.key for o in opts]:
             init_val = opts[0].key if opts else None
         dd = ft.Dropdown(value=init_val, options=opts, data=field.key,
@@ -138,13 +139,13 @@ def _build_field(field: Field, refs: dict, errors: list,
         refs[field.key] = dd
         return _field_row(field, [dd] + err_widgets, center=True)
 
-    # ── multiline / list / object / json: 多行 TextField ──
+    # ── multiline / list / object / json: multiline TextField ──
     if field.type in ("multiline", "list", "object", "json"):
         ctrl = _textfield(field, multiline=True, value=init)
         refs[field.key] = ctrl
         return _field_row(field, [ctrl] + err_widgets, center=False)
 
-    # ── path + browse: TextField + 浏览按钮 ──
+    # ── path + browse: TextField + browse button ──
     if field.type == "path" and field.browse:
         ctrl = _textfield(field, value=init)
         refs[field.key] = ctrl
@@ -156,7 +157,7 @@ def _build_field(field: Field, refs: dict, errors: list,
         return _field_row(field, [ft.Row([ctrl, browse_btn], spacing=4)] + err_widgets,
                           center=False)
 
-    # ── text / secret / integer / number: 单行 TextField ──
+    # ── text / secret / integer / number: single-line TextField ──
     ctrl = _textfield(field, value=init)
     if field.type in ("integer", "number"):
         ctrl.keyboard_type = ft.KeyboardType.NUMBER
@@ -167,14 +168,15 @@ def _build_field(field: Field, refs: dict, errors: list,
 def build_form(ct: ConfigType, refs: dict, values: dict | None = None,
                errors: dict | None = None, on_browse=None,
                on_change=None) -> list:
-    """渲染整棵表单控件树。
+    """Render the whole form control tree.
 
-    values:   dict[key → 控件值]（None 时用字段默认值，来自 to_form_values/
-              form_values_from_refs）
-    errors:   dict[key → [msg]]；含 "_general" 时在表单末尾显示通用错误
-    on_browse: callable(field, ref) — path 字段浏览按钮回调（由页面层注入
-              FilePicker 逻辑；须为同步函数，内部自行调度异步浏览）
-    on_change: callable(e) — select 字段 on_change（如模式联动重渲染；由页面层注入）
+    values:   dict[key → control value] (None means field defaults; comes from to_form_values /
+              form_values_from_refs)
+    errors:   dict[key → [msg]]; a "_general" key shows general errors at the end of the form
+    on_browse: callable(field, ref) — browse-button callback for path fields (injected with
+              FilePicker logic by the page layer; must be a synchronous function that
+              dispatches the async browse itself)
+    on_change: callable(e) — on_change for select fields (e.g. mode-linked re-render; injected by the page layer)
     """
     refs.clear()
     err_dict = errors or {}
@@ -184,7 +186,7 @@ def build_form(ct: ConfigType, refs: dict, values: dict | None = None,
             controls.append(_group_header(group, is_first=(i == 0)))
         for field in group.fields:
             if not _visible(field, values):
-                continue  # visible_when 不满足 → 隐藏该字段
+                continue  # visible_when not satisfied → hide this field
             controls.append(_build_field(
                 field, refs, err_dict.get(field.key, []), values, on_browse,
                 on_change=on_change))
@@ -195,5 +197,5 @@ def build_form(ct: ConfigType, refs: dict, values: dict | None = None,
 
 
 def build_form_rows(ct: ConfigType, refs: dict, errors: dict | None = None) -> list:
-    """兼容入口（页面层旧调用；新代码请走 build_form）。"""
+    """Compatibility entry (old page-layer call; new code should use build_form)."""
     return build_form(ct, refs, values=None, errors=errors)

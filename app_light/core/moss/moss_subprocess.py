@@ -1,7 +1,8 @@
-"""MOSS 子进程常驻形态（备用）：web_cli 子进程 + HTTP 客户端。
+"""Resident MOSS subprocess form (backup): web_cli subprocess + HTTP client.
 
-主环境安装 MOSS 库后，直接以主 python 拉起 ``moss_transcribe_diarize.app.web_cli``
-子进程常驻，通过 REST API 提交转写任务（进程级隔离、可热重启）。
+Once the MOSS libraries are installed in the main environment, spawn a resident
+``moss_transcribe_diarize.app.web_cli`` subprocess with the main python and submit
+transcription tasks via the REST API (process-level isolation, hot restartable).
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from .audio_utils import probe_duration
 from .moss_service import resolve_model_path
 from .speaker_utils import force_single_speaker
 
-# 子进程就绪探测的超时（模型加载可能较久）
+# Timeout for subprocess readiness probing (model loading can take a while)
 PREPARE_TIMEOUT_SEC = 600.0
 POLL_INTERVAL = 0.5
 
@@ -33,19 +34,19 @@ class MossSubprocessService(Service):
 
     Usage::
         svc = MossSubprocessService(model_config)
-        svc.start()          # Popen web_cli → 轮询 /api/runtime 就绪
+        svc.start()          # Popen web_cli → poll /api/runtime for readiness
         tx = svc.get_executor()
         ...
         svc.stop()           # terminate → wait(5) → kill
 
-    config 要点::
-        python              解释器路径（默认 sys.executable，即主环境）
-        model_path          模型目录（相对项目根或绝对路径）
-        runs_dir            任务产物目录（默认 runs/moss，相对项目根）
-        host / port         默认 127.0.0.1 / 7861
-        device / dtype      默认 auto / bf16
-        prompt              单说话人提示词（默认见 configs/models/moss_subprocess.json）
-        single_speaker      结果侧说话人归一化（默认 true）
+    Config highlights::
+        python              interpreter path (default sys.executable, i.e. the main environment)
+        model_path          model directory (relative to project root or absolute)
+        runs_dir            task output directory (default runs/moss, relative to project root)
+        host / port         default 127.0.0.1 / 7861
+        device / dtype      default auto / bf16
+        prompt              single-speaker prompt (defaults in configs/models/moss_subprocess.json)
+        single_speaker      result-side speaker normalization (default true)
     """
 
     def __init__(self, config: dict, on_status_change: Optional[Callable] = None):
@@ -106,12 +107,12 @@ class MossSubprocessService(Service):
         self._emit()
 
     def _drain_output(self):
-        """子进程 stdout 透传为服务日志（后台线程）。"""
+        """Forward the subprocess stdout to the service log (background thread)."""
         for line in self._proc.stdout:
             self._log("info", line.rstrip())
 
     def _wait_for_preparing(self, timeout: float = PREPARE_TIMEOUT_SEC):
-        """轮询 GET /api/runtime 直到子进程服务就绪。"""
+        """Poll GET /api/runtime until the subprocess service is ready."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self._proc.poll() is not None:
@@ -156,9 +157,10 @@ class MossSubprocessService(Service):
 
 
 class MossHttpTranscriber(Executor):
-    """HTTP 客户端：multipart 上传 → 轮询任务状态 → 拉取 segments。
+    """HTTP client: multipart upload → poll task status → fetch segments.
 
-    任务终态判断：``waiting_review``（转写完成待审）与 ``done`` 均视为完成。
+    Terminal status handling: both ``waiting_review`` (transcription complete, pending review)
+    and ``done`` are treated as complete.
     """
 
     def __init__(self, base_url: str, defaults: Optional[dict] = None):
@@ -171,7 +173,7 @@ class MossHttpTranscriber(Executor):
         progress_callback: Optional[Callable[[float, float, float, Optional[dict]], None]] = None,
         cancel_event: Optional[object] = None,
     ) -> dict:
-        """Run transcription from *task*（契约同 MossTranscriber）。"""
+        """Run transcription from *task* (contract same as MossTranscriber)."""
         cfg = self._resolve_task(task)
         args = cfg.get("transcribe_config") or {}
         merged = {**self.defaults, **args}
@@ -201,8 +203,8 @@ class MossHttpTranscriber(Executor):
             info = {k: detail.get(k) for k in (
                 "model", "prompt_len", "generated_tokens", "elapsed_sec",
                 "inference", "usage", "files") if detail.get(k) is not None}
-            # 收尾进度：与进程内形态一致，进度补满 100%（队列在 execute
-            # 返回后才翻转 status，完成瞬间进度条可见满格）。
+            # Final progress: consistent with the in-process form, progress topped at 100%
+            # (the queue flips status only after execute() returns, so the bar is full at completion).
             if progress_callback is not None:
                 payload = {"status": detail.get("status") or "done",
                            "generated_tokens": detail.get("generated_tokens")}
@@ -215,7 +217,7 @@ class MossHttpTranscriber(Executor):
                     progress_callback(1.0, 1.0, None, payload)
             return {"segments": segments, "info": info}
         except Exception:
-            # 取消或失败时清理服务端任务
+            # Clean up the server-side task on cancel or failure
             try:
                 requests.delete(f"{self.base_url}/api/jobs/{job_id}", timeout=10)
             except Exception:
@@ -224,10 +226,11 @@ class MossHttpTranscriber(Executor):
 
     def _poll(self, job_id, progress_callback, cancel_event, task,
               duration: Optional[float] = None) -> dict:
-        """轮询任务状态；取消 → DELETE + CancelledError；终态返回 job detail。
+        """Poll task status; on cancel → DELETE + CancelledError; return job detail at a terminal state.
 
-        进度回调与进程内 MossTranscriber 对齐：有音频时长时按时间轴
-        （pos/total=秒）上报，否则回退比例语义（unit=ratio）。
+        Progress callbacks align with the in-process MossTranscriber: with an audio
+        duration, report on the timeline (pos/total in seconds); otherwise fall back
+        to ratio semantics (unit=ratio).
         """
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -252,7 +255,7 @@ class MossHttpTranscriber(Executor):
             time.sleep(POLL_INTERVAL)
 
     def _resolve_task(self, task):
-        """转写语义解析：file_path 作为音频路径，configs["args"] 提供参数。"""
+        """Transcription semantics: file_path as the audio path, configs["args"] providing params."""
         _source, configs = super()._resolve_task(task)
         args = configs.get("args")
         return {

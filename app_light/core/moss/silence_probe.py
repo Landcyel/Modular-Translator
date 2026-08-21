@@ -1,14 +1,17 @@
-"""MOSS 长音频切块的静音探测（能量包络法，零额外依赖）。
+"""Silence probing for MOSS long-audio chunking (energy-envelope method, zero extra dependencies).
 
-用途：切块规划时在候选边界带内寻找静音切点，让切点落在自然停顿上，
-避免截断正常说话。只解码边界带（每带几十秒），绝不整段解码，
-内存占用为常数级（帧级 RMS 数组，1 小时音频 ≈ 0.6 MB）。
+Purpose: during chunk planning, find a silence cut within each candidate boundary
+band so cuts land on natural pauses and never truncate normal speech. Only the
+boundary bands are decoded (tens of seconds each), never the whole clip, so memory
+usage is constant-order (frame-level RMS array, ~0.6 MB for 1 hour of audio).
 
-实现：ffmpeg 精确切带 → PyAV 重采样 16kHz 单声道 → 逐 25ms 帧 RMS(dBFS)
-→ 自适应阈值（噪声底 + 动态范围份额）→ 静音段（含零星脉冲桥接）。
+Implementation: ffmpeg precise band cut → PyAV resample to 16kHz mono → per-25ms-frame
+RMS(dBFS) → adaptive threshold (noise floor + dynamic-range share) → silence runs
+(bridging sporadic loud pulses).
 
-所有失败路径（文件缺失/解码失败/动态范围不足）返回 None，
-调用方回退算术硬切 + 边界文本修复，保证转写可用性不受影响。
+All failure paths (missing file / decode failure / insufficient dynamic range) return None;
+the caller falls back to arithmetic hard cuts + boundary text repair, so transcription
+availability is unaffected.
 """
 from __future__ import annotations
 
@@ -20,23 +23,23 @@ from typing import Optional
 
 from app.paths import project_root
 
-FRAME_SEC = 0.025          # 帧长（秒）
-SAMPLE_RATE = 16000        # 重采样率
-BRIDGE_TOL_SEC = 0.15      # 静音段间可桥接的响亮脉冲上限（容忍噪声咔嗒）
-NOISE_PERCENTILE = 15      # 噪声底分位
-SPEECH_PERCENTILE = 85     # 语音能量分位
-RANGE_FRACTION = 0.4       # 阈值 = 噪声底 + 动态范围 × 该份额
-MIN_DYNAMIC_DB = 8.0       # 动态范围低于此值 → 无可靠静音（纯噪声/纯语音）
-ABS_SILENCE_DB = -50.0     # 绝对静音下限（低于此值恒为静音）
-MIN_CUT_RUN_SEC = 0.30     # 有效切点所需最短静音时长（秒，低于此值切点无意义）
+FRAME_SEC = 0.025          # frame length (seconds)
+SAMPLE_RATE = 16000        # resample rate
+BRIDGE_TOL_SEC = 0.15      # max loud pulse bridgeable between silence runs (tolerates noise clicks)
+NOISE_PERCENTILE = 15      # noise floor percentile
+SPEECH_PERCENTILE = 85     # speech energy percentile
+RANGE_FRACTION = 0.4       # threshold = noise floor + dynamic range × this share
+MIN_DYNAMIC_DB = 8.0       # below this dynamic range → no reliable silence (pure noise/speech)
+ABS_SILENCE_DB = -50.0     # absolute silence floor (always silent below this)
+MIN_CUT_RUN_SEC = 0.30     # min silence length for a valid cut (seconds; shorter is meaningless)
 
 
 def load_band_rms(audio_path, start_sec: float, end_sec: float,
                   frame_sec: float = FRAME_SEC,
                   sr: int = SAMPLE_RATE) -> Optional[list]:
-    """解码 ``[start_sec, end_sec)`` 音频带 → 逐帧 RMS 列表（dBFS）。
+    """Decode the ``[start_sec, end_sec)`` audio band → per-frame RMS list (dBFS).
 
-    文件缺失 / ffmpeg 失败 / 解码异常一律返回 None。
+    Always returns None on missing file / ffmpeg failure / decode error.
     """
     if not audio_path or not os.path.isfile(str(audio_path)):
         return None
@@ -95,7 +98,7 @@ def load_band_rms(audio_path, start_sec: float, end_sec: float,
 
 
 def _read_mono_f32(wav: Path, sr: int):
-    """PyAV 读取 16kHz 单声道浮点样本（[-1, 1]）；失败返回 None。"""
+    """Read 16kHz mono float samples ([-1, 1]) via PyAV; None on failure."""
     try:
         import av
         import numpy as np
@@ -132,10 +135,11 @@ def _read_mono_f32(wav: Path, sr: int):
 def find_silence_cut(rms_db, band_start: float, target: float,
                      silence_min_sec: float = 0.35,
                      frame_sec: float = FRAME_SEC) -> Optional[float]:
-    """在带内寻找最合适的静音切点（绝对秒）；找不到返回 None。
+    """Find the best silence cut within the band (absolute seconds); None if none is found.
 
-    评分 = 静音时长（上限 4s 封顶）×2 − 距目标切点的距离，
-    并轻度偏向目标切点之前（窗口只缩不长，守住显存预算）。
+    Score = silence duration (capped at 4s) ×2 − distance to the target cut,
+    with a slight preference for before the target (windows only shrink, never grow,
+    keeping the VRAM budget).
     """
     if not rms_db or len(rms_db) < 2:
         return None
@@ -147,7 +151,7 @@ def find_silence_cut(rms_db, band_start: float, target: float,
     noise = float(np.percentile(arr, NOISE_PERCENTILE))
     speech = float(np.percentile(arr, SPEECH_PERCENTILE))
     if speech - noise < MIN_DYNAMIC_DB:
-        return None  # 动态范围不足：可能是纯语音连读，切点无意义
+        return None  # insufficient dynamic range: possibly continuous pure speech; a cut is meaningless
     thr = noise + RANGE_FRACTION * (speech - noise)
     silent = (arr < thr) | (arr < ABS_SILENCE_DB)
     bridge_frames = max(1, int(round(BRIDGE_TOL_SEC / frame_sec)))
@@ -168,7 +172,7 @@ def find_silence_cut(rms_db, band_start: float, target: float,
 
 
 def _silence_runs(silent, bridge_frames: int) -> list:
-    """静音布尔序列 → [(起帧, 止帧), ...]（≤bridge 帧的响亮脉冲并入）。"""
+    """Silence boolean sequence → [(start frame, end frame), ...] (loud pulses ≤ bridge frames are merged in)."""
     runs = []
     start = None
     loud_streak = 0

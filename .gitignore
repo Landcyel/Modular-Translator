@@ -1,52 +1,53 @@
-# ─────────────────────────────────────────────
-# 仓库根 .gitignore — ModularTranslator
-# app_light/ 内部规则见 app_light/.gitignore（文档/笔记/API 密钥等）
-# ─────────────────────────────────────────────
+# ── Root .gitignore — ModularTranslator ──
+# Internal rules for app_light/ live in app_light/.gitignore (docs/notes/API keys etc.)
 
 # Python
 __pycache__/
 *.py[cod]
 .pytest_cache/
 
-# 压缩包/备份
+# Archives/backups
 *.rar
 *.zip
 *.bak
 
-# 依赖/模型/运行时（GB 级，不入库，需单独分发）
-# 注意: app_light/dependencies 与 app_light/characters 是指向根级的
-# junction；无斜杠前缀的目录模式同时覆盖根级与 app_light 级，
-# 防止 git 跟随 junction 把 15GB+ 拉进索引
+# Dependencies/models/runtime (GB-scale, not committed; distributed separately)
+# Note: app_light/dependencies and app_light/characters are junctions pointing to
+# the root level; directory patterns without a leading slash cover both the root
+# and app_light levels, preventing git from following the junctions and pulling
+# 15GB+ into the index
 dependencies/
 characters/
 
-# 虚拟环境
+# Virtual environments
 .venv/
 venv/
 env/
 
-# 双版本物理副本（app_workflow / app_lite）——时点快照，
-# 内容由 git 分支导出刷新；不入库（权威版本源 = git 分支）
+# Physical copies of the dual versions (app_workflow / app_lite) — point-in-time
+# snapshots refreshed by exporting from git branches; not committed (authoritative
+# source = git branch)
 app_workflow/
 app_lite/
 
-# 打包产物与中间文件（/build/ 锚定根级，保留 app_light/tools/build/ 脚本）
+# Build artifacts and intermediate files (/build/ anchored at root; keep
+# app_light/build/ packaging scripts)
 /build/
 dist/
 build_assets/
 *.spec
 
-# 生成物、日志与临时文件
+# Artifacts, logs and temporary files
 /app.log
 output/
 temp/
 logs/
 test_data/
 
-# 工具工作目录
+# Tool working directory
 .zcode/
 
-# IDE / 系统
+# IDE / system
 .idea/
 .vscode/
 Thumbs.db

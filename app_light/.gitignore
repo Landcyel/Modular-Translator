@@ -6,29 +6,30 @@ __pycache__/
 venv/
 env/
 
-# 压缩包/备份
+# Archives/backups
 *.rar
 *.zip
 *.bak
 
-# 依赖/模型/运行时（GB 级，不纳入版本控制，需单独分发）
+# Dependencies/models/runtime (GB-scale, not under version control; distributed separately)
 dependencies/
 
-# 打包产物与中间文件（PyInstaller；/build/pyinstaller/ 为中间产物，build/ 打包脚本入库）
+# Build artifacts and intermediate files (PyInstaller; /build/pyinstaller/ is
+# intermediate; build/ packaging scripts are committed)
 /build/pyinstaller/
 dist/
 build_assets/
 *.spec
 
-# 生成物与临时文件
+# Artifacts and temporary files
 output/
 temp/
 
-# 本地配置（含真实 API 密钥，不提交；模板为 default.example.json）
+# Local config (contains real API keys, not committed; template is default.example.json)
 configs/models/API/default.json
 
-# 仅跟踪 configs/ core/ ui/ app/ build/（打包脚本）及 pytest.ini
-# 以下为本地文档/测试数据/工具脚本/临时内容，不入库
+# Only configs/ core/ ui/ app/ build/ (packaging scripts) and pytest.ini are tracked
+# The following are local docs/test data/tool scripts/temporary content, not committed
 tests/
 tools/
 archived/
@@ -42,17 +43,18 @@ reasonix.toml
 .idea/
 .vscode/
 
-# 系统
+# System
 Thumbs.db
 .DS_Store
 
-# 本地工具状态与运行时日志
+# Local tool state and runtime logs
 .reasonix/
 logs/
 characters/
 test_data/
 
-# 双版本物理副本（app_workflow / app_lite）——时点快照，由 tools/sync_version_dirs.py
-# 从 git 分支重新导出刷新；不纳入版本控制（权威版本源 = git 分支）
+# Physical copies of the dual versions (app_workflow / app_lite) — point-in-time
+# snapshots re-exported from git branches by tools/sync_version_dirs.py; not under
+# version control (authoritative source = git branch)
 app_workflow/
 app_lite/

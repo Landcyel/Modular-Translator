@@ -1,8 +1,8 @@
-"""GsvEngine —— GPT-SoVITS 推理引擎（复刻 inference_webui_fast.py GUI 推理流程）。
+"""GsvEngine — GPT-SoVITS inference engine (replicates the inference_webui_fast.py GUI inference flow).
 
-- 源码 vendored 于 vendor/（从 GPT-SoVITS-main 复制，零修改）
-- 重型权重经 Windows junction 指向 models/（见 vendor_links.py）
-- 仅实现推理，不依赖 core/ 框架
+- Source is vendored under vendor/ (copied from GPT-SoVITS-main, zero modification)
+- Heavy weights point to models/ via Windows junctions (see vendor_links.py)
+- Inference only; does not depend on the core/ framework
 """
 
 from .engine import GsvEngine

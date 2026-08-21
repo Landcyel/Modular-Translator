@@ -1,7 +1,7 @@
-"""MOSS-Transcribe-Diarize 进程内服务（主形态，仿 FasterWhisperService）。
+"""In-process MOSS-Transcribe-Diarize service (primary form, modeled on FasterWhisperService).
 
-MOSS 库（``moss_transcribe_diarize`` + ``transformers>=5.6``）随主环境安装；
-模型位于 ``dependencies/models/moss``（HF 本地快照），加载延迟到 ``start()``。
+The MOSS libraries (``moss_transcribe_diarize`` + ``transformers>=5.6``) are installed with the main environment;
+models live under ``dependencies/models/moss`` (local HF snapshot), and loading is deferred to ``start()``.
 """
 from __future__ import annotations
 
@@ -17,10 +17,11 @@ from .moss_transcriber import MossTranscriber
 
 
 def resolve_model_path(model_path) -> str:
-    """相对模型路径解析为绝对路径（dependencies/models/ 下本地目录）。
+    """Resolve a relative model path to an absolute path (a local directory under dependencies/models/).
 
-    绝对路径原样返回；相对路径依次尝试项目根、``dependencies/models/``
-    下目录，命中则解析；均未命中则原样返回（保留 HF repo id 的用法）。
+    Absolute paths are returned as-is; relative paths try the project root and then
+    ``dependencies/models/`` subdirectories, resolving on the first hit; if none
+    match, the path is returned as-is (preserving the HF repo id usage).
     """
     if not model_path or os.path.isabs(str(model_path)):
         return str(model_path)
@@ -35,20 +36,20 @@ class MossService(Service):
     """Manage a MOSS-Transcribe-Diarize ModelRunner and provide a MossTranscriber.
 
     Usage::
-        svc = MossService(model_config)   # dict 或 JSON 文件路径
+        svc = MossService(model_config)   # dict or JSON file path
         svc.start()
         tx = svc.get_executor()
         ...
         svc.stop()
 
-    config 要点::
-        model_path        模型目录（相对项目根或绝对路径）
-        device / dtype    默认 auto / bf16
-        lazy_load         默认 true（懒加载：首个转写任务时才加载模型）；
-                          false → start() 即加载（关闭懒加载，设备/内存提前确定）
-        prompt            转写提示词（单说话人配方见 configs/models/moss/default.json）
-        single_speaker    结果侧说话人归一化（默认 true）
-        max_new_tokens / max_len / decoding   服务级转写默认参数
+    Config highlights::
+        model_path        model directory (relative to project root or absolute)
+        device / dtype    default auto / bf16
+        lazy_load         default true (lazy: model loads on the first transcription task);
+                          false → start() loads immediately (lazy off, device/memory fixed early)
+        prompt            transcription prompt (single-speaker recipe in configs/models/moss/default.json)
+        single_speaker    result-side speaker normalization (default true)
+        max_new_tokens / max_len / decoding   service-level transcription defaults
     """
 
     def __init__(self, config: dict, on_status_change: Optional[Callable] = None):
@@ -69,15 +70,15 @@ class MossService(Service):
         if self._running:
             return
         import time as _time
-        _st_t0 = _time.perf_counter()  # start 起点（含首次 import torch/transformers）
-        ensure_available()  # 运行时缺失时给出安装指引，而不是难懂的 ModuleNotFoundError
-        from moss_transcribe_diarize.app.model_runner import ModelRunner  # 延迟导入
+        _st_t0 = _time.perf_counter()  # start() origin (includes first import of torch/transformers)
+        ensure_available()  # give install guidance on missing runtime instead of a cryptic ModuleNotFoundError
+        from moss_transcribe_diarize.app.model_runner import ModelRunner  # lazy import
 
         cfg = self._config
         try:
-            # 优先使用自定义 StreamingModelRunner（部分文本 → 实时段预览，
-            # 与 Whisper 预览逻辑一致）；其导入/构造失败时回退 vendor 原版
-            # （功能不退化，仅运行中预览退化为完成后刷新）。
+            # Prefer the custom StreamingModelRunner (partial text → live segment preview,
+            # matching Whisper preview logic); fall back to the vendor original when its
+            # import/construction fails (no feature loss, preview just refreshes on completion).
             from .streaming_runner import StreamingModelRunner
 
             runner_cls = StreamingModelRunner
@@ -96,9 +97,10 @@ class MossService(Service):
         except Exception as ex:
             self._log("error", f"MOSS 模型加载失败: {ex}")
             raise
-        # 懒加载开关：lazy_load=false → start() 即加载模型（关闭懒加载）。
-        # vendor ModelRunner._ensure_loaded() 幂等（is_loaded 则跳过），
-        # 持同一把 _lock 保证与 transcribe 互斥；加载失败向上抛（服务不置 running）。
+        # Lazy-load switch: lazy_load=false → start() loads the model immediately (lazy off).
+        # vendor ModelRunner._ensure_loaded() is idempotent (skips when is_loaded),
+        # sharing the same _lock for mutual exclusion with transcribe; load failure
+        # propagates up (service not marked running).
         if not cfg.get("lazy_load", True):
             t0 = time.time()
             self._log("info", "MOSS 模型加载中…")
@@ -118,7 +120,7 @@ class MossService(Service):
         self._executor = MossTranscriber(
             self._runner, defaults=cfg, on_first_load=self._on_moss_first_load,
         )
-        self._executor.set_on_log(self._log)   # 诊断日志透传（服务 → executor）
+        self._executor.set_on_log(self._log)   # pass diagnostic logs through (service → executor)
         self._running = True
         actual_device = getattr(self._runner, "_device", None)
         if actual_device is not None:
@@ -126,25 +128,26 @@ class MossService(Service):
                 "info",
                 f"MOSS 模型已加载（runtime={describe()}，实际设备={actual_device}）",
             )
-            # 模型已实际加载：按真实设备赋值
+            # Model actually loaded: assign the real device
             self.device = self._normalize_device(actual_device)
         else:
-            # ModelRunner 是懒加载：_device 在首个转写任务的 _ensure_loaded()
-            # 中才解析（auto → cuda:0/cpu）。启动阶段只记录配置与运行时，
-            # 真实设备由 MossTranscriber 首次转写完成后补记，避免误导为 None。
+            # ModelRunner is lazy: _device is only resolved in _ensure_loaded() of the first
+            # transcription task (auto → cuda:0/cpu). At startup only config and runtime are
+            # recorded; the real device is backfilled by MossTranscriber after the first
+            # transcription, to avoid misleadingly showing None.
             self._log(
                 "info",
                 f"MOSS 服务已就绪（runtime={describe()}，"
                 f"配置设备={cfg.get('device', 'auto')}，"
                 f"dtype={cfg.get('dtype', 'bf16')}；模型将在首个转写任务时加载）",
             )
-            # 懒加载：按配置解析预期设备（auto → torch 探测），
-            # 首次转写后由 _on_moss_first_load 校正为真实设备
+            # Lazy: resolve the expected device from config (auto → torch probe),
+            # corrected to the real device by _on_moss_first_load after the first transcription
             self.device = self._normalize_device(cfg.get("device", "auto"))
         self._emit()
 
     def _on_moss_first_load(self, device, dtype):
-        """首次转写（模型实际加载）后校正真实设备并推送状态。"""
+        """After the first transcription (model actually loaded), correct the real device and push status."""
         resolved = self._normalize_device(device)
         if resolved is not None:
             self.device = resolved

@@ -1,19 +1,19 @@
 """
-Modular Translator — 日文→中文翻译工作台
-Flet 桌面应用入口
+Modular Translator — Japanese-to-Chinese translation workbench.
+Flet desktop application entry point.
 
-运行：python APP.py
+Run: python APP.py
 """
 
-# ── windowed 模式兜底 ──
-# PyInstaller --noconsole 打包后 sys.stdout/sys.stderr 为 None，任何 print()
-# 都会抛 AttributeError 导致崩溃。此处重定向到 devnull；开发模式（控制台
-# 运行 python APP.py）下二者非 None，本块不生效，不影响正常输出。
+# ── Windowed-mode fallback ──
+# After PyInstaller --noconsole packaging, sys.stdout/sys.stderr are None and any
+# print() would raise AttributeError and crash. Redirect to devnull here; in dev
+# mode (console run of python APP.py) both are non-None, so this block is a no-op.
 import os
 import sys
 import time
 
-# 进程内启动起点（不含 exe/bootloader/PYTHON 运行时之前的时间）
+# In-process boot start point (excludes time before the exe/bootloader/Python runtime)
 T0 = time.perf_counter()
 
 if sys.stdout is None:
@@ -21,13 +21,14 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
-# ── 项目刚需 FFmpeg：最早设置 PATH，让全部 ffmpeg/ffprobe 子进程调用
-#    （含 vendored GPT-SoVITS / UVR5 的裸名调用）先命中 dependencies/FFmpeg ──
+# ── Project-critical FFmpeg: set PATH first ──
+# so every ffmpeg/ffprobe subprocess call (including bare-name calls from vendored
+# GPT-SoVITS / UVR5) hits dependencies/FFmpeg.
 from app.ffmpeg import ensure_ffmpeg_on_path  # noqa: E402
 
 ensure_ffmpeg_on_path()
 
-from app import torch_runtime  # noqa: F401  # 可插拔 torch 运行时（CPU 基线 / dependencies 外挂 CUDA），必须先于一切 torch/core import
+from app import torch_runtime  # noqa: F401  # pluggable torch runtime (CPU baseline / CUDA in dependencies), must precede all torch/core imports
 from app.log import log  # noqa: E402
 from app.paths import project_root  # noqa: E402
 
@@ -44,16 +45,17 @@ log.record("info", f"[boot] 进入 ft.run（+{time.perf_counter() - T0:.1f}s）"
 
 
 def main(page: ft.Page):
-    # ── 页面基础设置 ──
+    # ── Page base settings ──
     page.title = "Modular Translator"
     page.padding = 0
     page.spacing = 0
     page.theme_mode = ft.ThemeMode.DARK
     page.horizontal_alignment = ft.CrossAxisAlignment.START
 
-    # ── 任务栏/窗口图标（flet 0.86.2 Window.icon 仅支持 .ico）──
-    # 产物含构建期显式生成的 material/logo.ico；开发模式源目录无 ico 时，
-    # 运行时用 PIL 从 logo.png 生成到 temp/（不持久保存 ico）
+    # ── Taskbar/window icon (flet 0.86.2 Window.icon supports .ico only) ──
+    # The build output contains an explicitly generated material/logo.ico; in dev
+    # mode, when the source tree has no ico, generate one at runtime with PIL from
+    # logo.png into temp/ (the ico is not persisted).
     _icon = project_root / "material" / "logo.ico"
     if not _icon.is_file():
         _png = project_root / "material" / "logo.png"
@@ -68,17 +70,18 @@ def main(page: ft.Page):
                            (128, 128), (256, 256)],
                 )
             except Exception:
-                _icon = None  # 生成失败 → 保持默认图标
+                _icon = None  # generation failed → keep default icon
     if _icon is not None and _icon.is_file():
         page.window.icon = str(_icon)
 
     page.window.title_bar_hidden = True
     page.window.title_bar_buttons_hidden = True
 
-    # ── 窗口大小固定、禁止手动拉伸；允许最大化/恢复 ──
-    # 固定为当前窗口尺寸（flet 0.86.2 Window API：width/height/resizable/min_width）
-    # resizable=False 防拖拽拉伸；不设 max_width/max_height，最大化时窗口可扩展，
-    # 面板高度随内容区 flex 动态变化，恢复后回到固定尺寸。
+    # ── Fixed window size, manual resize disabled; maximize/restore allowed ──
+    # Fix to the current window size (flet 0.86.2 Window API: width/height/resizable/min_width)
+    # resizable=False prevents drag-resize; max_width/max_height unset so the window can
+    # expand when maximized, with panel heights following the content area flex, and
+    # returns to the fixed size on restore.
     win_w = page.window.width or 1280
     win_h = page.window.height or 800
     page.window.width = win_w
@@ -87,7 +90,7 @@ def main(page: ft.Page):
     page.window.min_height = win_h
     page.window.resizable = False
 
-    # ── 自定义主题 ──
+    # ── Custom theme ──
     page.theme = ft.Theme(
         color_scheme_seed=Palette.PRIMARY,
         font_family="Microsoft YaHei",
@@ -97,18 +100,20 @@ def main(page: ft.Page):
         font_family="Microsoft YaHei",
     )
 
-    # ── 窗口关闭处理 ──
-    # flet 0.86.2：窗口事件监听器挂在 page.window.on_event（Page 无 on_window_event）。
-    # prevent_close=True 拦截原生关闭请求（任务栏/Alt+F4/标题栏 X），
-    # 收到 WindowEventType.CLOSE 后由我们决定是否真正关闭。
+    # ── Window close handling ──
+    # flet 0.86.2: window event listener is attached to page.window.on_event
+    # (Page has no on_window_event). prevent_close=True intercepts native close
+    # requests (taskbar/Alt+F4/titlebar X); on WindowEventType.CLOSE we decide
+    # whether to actually close.
     page.window.prevent_close = True
     closing = False
-    # 兜底绑定：build_layout 若抛异常（get_facade 未赋值），关闭事件闭包
-    # 仍可引用（shutdown_and_destroy 兼容 None），避免二次 NameError 崩溃。
+    # Fallback binding: if build_layout raises (get_facade never assigned), the
+    # close event closure can still reference it (shutdown_and_destroy accepts
+    # None), avoiding a secondary NameError crash.
     get_facade = None
 
     async def on_window_close(e):
-        # 防止 shutdown/destroy 期间重复收到 CLOSE 而二次销毁
+        # Prevent a second CLOSE event during shutdown/destroy from destroying twice
         nonlocal closing
         if e.type == ft.WindowEventType.CLOSE and not closing:
             closing = True
@@ -116,18 +121,20 @@ def main(page: ft.Page):
 
     page.window.on_event = on_window_close
 
-    # ── 构建布局（facade 在 layout 内部惰性创建，此处解包供关闭时优雅停止服务）──
-    # 两阶段渲染：build_layout 同步段只构建轻量外壳（品牌+导航+顶栏+内容区
-    # 骨架占位）并调度 run_task 后台初始化（core 重链导入+页面构建）；下方
-    # page.update() 推送首帧（骨架，毫秒级出界面），后台完成后替换内容区。
-    # get_facade 为惰性 getter（未初始化返回 None），关闭时经 shutdown_and_destroy 兼容。
+    # ── Build layout (facade created lazily inside layout; unpacked here for graceful shutdown) ──
+    # Two-phase rendering: the synchronous part of build_layout only builds a light
+    # shell (brand + nav + top bar + content-area skeleton placeholders) and schedules
+    # a run_task background init (core re-import + page build); the page.update() below
+    # pushes the first frame (skeleton, UI appears in milliseconds), then the background
+    # work replaces the content area. get_facade is a lazy getter (None until initialized),
+    # compatible with shutdown_and_destroy on close.
     content_area, switch_page, fp_translate, fp_transcribe, fp_log, fp_gsv, get_facade = build_layout(page)
     log.record("info", f"[boot] 首帧骨架构建完成（+{time.perf_counter() - T0:.1f}s）")
 
-    # ── 页面更新 ──
+    # ── Page update ──
     page.update()
 
-    # ── 注册 FilePicker ──
+    # ── Register FilePickers ──
     page._services.register_service(fp_translate)
     page._services.register_service(fp_transcribe)
     page._services.register_service(fp_log)

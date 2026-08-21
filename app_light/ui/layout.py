@@ -1,11 +1,11 @@
-"""主布局骨架 — 左右双列结构（APP_test 外壳）。
+"""Main layout skeleton — left/right two-column structure (APP shell).
 
-左列 Column：品牌区（250px）+ 导航栏（250px，expand 占满剩余高度）
-右列 Column：顶栏（34px，窗口控制）+ 内容区（expand）
+Left column: brand area (250px) + navigation rail (250px, expand to fill remaining height)
+Right column: top bar (34px, window controls) + content area (expand)
 
-六页导航：转写 / 翻译 / 语音合成 / 已完成任务 / 设置 / 日志
-facade 在此层实例化并传递给各页面 builder。
-页面实例模式：每个页面长期持有状态，导航时调用 build/refresh。
+Six-page navigation: Transcribe / Translate / TTS / Completed / Settings / Logs
+The facade is instantiated at this layer and passed to each page builder.
+Page instance pattern: each page holds state long-term; navigation calls build/refresh.
 """
 
 import asyncio
@@ -20,17 +20,18 @@ from ui.skeleton import skeleton_placeholder, error_placeholder
 
 
 async def shutdown_and_destroy(facade, page: ft.Page):
-    """统一关闭流程：优雅停止服务后销毁窗口。
+    """Unified shutdown flow: gracefully stop services, then destroy the window.
 
-    供两处共用：APP.py 的 ``window.on_event`` CLOSE 分支，以及本文件顶栏
-    关闭按钮（经 ``window.close()`` 走同一 CLOSE 分支）。
+    Shared by two call sites: APP.py's ``window.on_event`` CLOSE branch, and the top-bar
+    close button in this file (which goes through the same CLOSE branch via ``window.close()``).
 
-    - *facade* 兼容两种传参：服务实例对象，或惰性 getter（build_layout 现
-      返回 get_facade 函数，未初始化时为 None）。None 时跳过 shutdown——
-      服务从未启动，无残留子进程。
-    - ``facade.shutdown()`` 异常只打印不抛出——否则 ``prevent_close=True``
-      下唯一出口是 ``destroy()``，异常会导致窗口永远关不掉。
-    - ``finally`` 保证 ``destroy()`` 必然执行。
+    - *facade* accepts two forms: a service instance, or a lazy getter (build_layout now
+      returns a get_facade function; it is None when uninitialized). None skips shutdown —
+      the service never started, so no residual child processes.
+    - Exceptions in ``facade.shutdown()`` are logged, not raised — otherwise, under
+      ``prevent_close=True`` the only exit is ``destroy()`` and an exception would leave
+      the window unclosable forever.
+    - ``finally`` guarantees ``destroy()`` always runs.
     """
     try:
         facade_obj = facade() if callable(facade) else facade
@@ -43,19 +44,21 @@ async def shutdown_and_destroy(facade, page: ft.Page):
 
 
 def build_layout(page: ft.Page):
-    """构建主布局，返回 (content_area, switch_page_fn, fp_translate, fp_transcribe, fp_log, fp_gsv, get_facade)。
+    """Build the main layout; returns (content_area, switch_page_fn, fp_translate, fp_transcribe, fp_log, fp_gsv, get_facade).
 
-    facade / 页面实例 / core 重链改为惰性初始化：build_layout 同步段只构建
-    轻量外壳（品牌/导航/顶栏/骨架占位），零 core import（重模块后移到
-    后台线程，由 load_content 触发 ensure_initialized 导入）。
+    Facade / page instances / core chain are lazily initialized: the synchronous part of
+    build_layout only builds the lightweight shell (brand/nav/top bar/skeleton placeholder)
+    with zero core imports (heavy modules moved to the background thread and imported by
+    ensure_initialized, triggered by load_content).
 
-    - get_facade：惰性取 facade 的函数（未初始化返回 None），供窗口关闭时
-      调用 shutdown() 优雅停止服务（防 llama-server 子进程残留）。
-    - switch_page_fn(idx) 用于切换当前展示的页面内容。
-    - fp_translate / fp_transcribe 为 FilePicker 实例（同步创建）。
+    - get_facade: a function that lazily returns the facade (None when uninitialized);
+      used at window close to call shutdown() for a graceful stop (prevents llama-server
+      child-process leftovers).
+    - switch_page_fn(idx) switches the currently displayed page content.
+    - fp_translate / fp_transcribe are FilePicker instances (created synchronously).
     """
 
-    # ── 共享 FilePicker（轻量构造，同步创建；APP.py 首帧前注册）──
+    # ── Shared FilePickers (lightweight, created synchronously; registered by APP.py before the first frame) ──
     file_picker_translate = ft.FilePicker()
     file_picker_transcribe = ft.FilePicker()
     file_picker_completed = ft.FilePicker()
@@ -63,21 +66,22 @@ def build_layout(page: ft.Page):
     file_picker_log = ft.FilePicker()
     file_picker_gsv = ft.FilePicker()
 
-    # ── 惰性初始化：facade / 页面实例 / core 重链延迟到后台线程首次触发 ──
-    # 骨架首帧前零 core import（openai 等重库全部后移）。
+    # ── Lazy init: facade / page instances / core chain deferred to the first background-thread trigger ──
+    # Zero core imports before the skeleton's first frame (heavy libs like openai all moved later).
     _init: dict = {"facade": None, "pages": None, "done": False}
 
     def ensure_initialized() -> None:
-        """首次调用时导入 core 重链并实例化 facade + 4 个页面（后台线程执行）。
+        """On first call, import the core chain and instantiate the facade + pages (runs on a background thread).
 
-        幂等：done 置位后直接返回。页面 __init__ 不触发 update/服务注册；
-        Settings 的 FilePicker 注册副作用由 load_content 在主线程处理。
+        Idempotent: returns immediately once done is set. Page __init__ does not trigger
+        update/service registration; the Settings FilePicker registration side effect is
+        handled by load_content on the main thread.
         """
         if _init["done"]:
             return
         from app.torch_runtime import ensure_available
 
-        ensure_available()  # 无 torch 运行时（冻结产物缺外挂包）时给出可读错误，由 load_content 显示
+        ensure_available()  # gives a readable error when the torch runtime is missing (frozen build lacks the external package); displayed by load_content
         from app.facade import AppFacade
         from core.task_que import TranslationTaskQueue, TranscriptionTaskQueue, GsvTaskQueue
         from core.service import LlamaService, APIService, GsvService
@@ -116,15 +120,16 @@ def build_layout(page: ft.Page):
         _init["done"] = True
 
     def get_facade():
-        """惰性获取 facade（未初始化时返回 None；供窗口关闭优雅停止服务）。"""
+        """Lazily get the facade (None when uninitialized; used for a graceful stop at window close)."""
         return _init["facade"]
 
     current_index = 0
 
-    # ── 骨架加载动画（品牌呼吸 + 占位脉冲 + 提示文案轮换）──
-    # 协程以 _stop_event（threading.Event）停止：run_task 返回的 concurrent
-    # Future 对已运行任务 cancel() 无效，事件标志才是可靠取消点；stop 后协程
-    # 在下一轮循环退出（≤0.8s 残留无害）。仅骨架占位显示期间运行。
+    # ── Skeleton loading animation (brand breathing + placeholder pulse + hint text rotation) ──
+    # The coroutine is stopped via _stop_event (threading.Event): the concurrent Future
+    # returned by run_task cannot cancel() an already-running task; the event flag is the
+    # reliable cancellation point. After stop the coroutine exits on the next loop
+    # iteration (≤0.8s residue is harmless). Runs only while the skeleton placeholder is shown.
     brand_icon_ref = ft.Ref[ft.Container]()
     placeholder_root = ft.Ref[ft.Container]()
     placeholder_text = ft.Ref[ft.Text]()
@@ -133,7 +138,7 @@ def build_layout(page: ft.Page):
     _pulse_task = None
 
     def _make_placeholder(text: str = "正在加载…"):
-        """构建当前骨架占位（绑定动画 refs，脉冲/文案轮换作用于最新占位）。"""
+        """Build the current skeleton placeholder (binds animation refs; pulse/text rotation acts on the latest placeholder)."""
         return skeleton_placeholder(text, ref=placeholder_root, text_ref=placeholder_text)
 
     def _stop_loading_animation():
@@ -148,10 +153,10 @@ def build_layout(page: ft.Page):
             _pulse_task = page.run_task(_animate_loading)
 
     async def _animate_loading():
-        """骨架阶段加载动画：品牌图标呼吸 + 占位整区脉冲 + 提示文案轮换。
+        """Skeleton-phase loading animation: brand icon breathing + whole-placeholder pulse + hint text rotation.
 
-        每次迭代对品牌/占位做一次 update（真实挂载后正常；未挂载或占位
-        已被替换时抛 RuntimeError，防御捕获）。
+        Each iteration updates the brand/placeholder once (fine once really mounted; a
+        RuntimeError is raised when unmounted or the placeholder was replaced — caught defensively).
         """
         low = False
         step = 0
@@ -177,7 +182,7 @@ def build_layout(page: ft.Page):
             step += 1
             await asyncio.sleep(0.8)
 
-    # ── 内容区域（初始为骨架占位；页面切换直接替换，无过渡动画）──
+    # ── Content area (initially a skeleton placeholder; page switches replace it directly, no transition) ──
     content_area = ft.Container(
         content=_make_placeholder(),
         padding=ft.Padding.all(Layout.CONTENT_GAP),
@@ -186,30 +191,30 @@ def build_layout(page: ft.Page):
     )
 
     def _set_content(tree: ft.Control):
-        """切换内容区（直接替换 content，无切换动画）。"""
+        """Switch the content area (directly replaces content; no transition animation)."""
         content_area.content = tree
         try:
             content_area.update()
         except RuntimeError:
             pass
 
-    # ── 页面控件树缓存（首次后台构建，切换时复用 + refresh，不重新 build）──
+    # ── Page control-tree cache (first built in the background; reused + refresh on switch, no rebuild) ──
     views: dict = {}
 
-    # ── 页面后台构建（两阶段渲染共用）──
+    # ── Background page build (shared by the two-phase render) ──
     def build_content(idx: int) -> ft.Control:
-        """同步构建第 idx 页完整控件树（在后台线程执行，纯对象创建）。"""
+        """Synchronously build the full control tree for page idx (runs on a background thread; pure object creation)."""
         return _init["pages"][idx].build()
 
     async def load_content(idx: int):
-        """两阶段渲染：占位先行 → 后台初始化/构建 → 主线程替换 + 刷新。
+        """Two-phase rendering: placeholder first → background init/build → main-thread replace + refresh.
 
-        - 阶段 A（后台线程）：ensure_initialized 导入 core 重链并实例化
-          facade + 页面（骨架首帧前零 core import）。
-        - 阶段 B（主线程）：处理页面"连接/注册类副作用"（SettingsPage 的
-          FilePicker 服务注册），避免跨线程 update。
-        - 阶段 C（后台线程）：构建页面完整树（纯对象创建）。
-        - 构建异常时内容区显示错误占位（不白屏、不崩溃）。
+        - Phase A (background thread): ensure_initialized imports the core chain and
+          instantiates the facade + pages (zero core imports before the skeleton's first frame).
+        - Phase B (main thread): handles page "connect/register side effects" (SettingsPage's
+          FilePicker service registration), avoiding cross-thread update.
+        - Phase C (background thread): builds the page's full tree (pure object creation).
+        - On a build error the content area shows an error placeholder (no blank screen, no crash).
         """
         try:
             await asyncio.to_thread(ensure_initialized)
@@ -233,7 +238,7 @@ def build_layout(page: ft.Page):
         try:
             _set_content(tree)
         except Exception as ex:
-            # patch 序列化/发送失败（如控件属性类型不被 msgpack 支持）→ 错误占位
+            # patch serialize/send failure (e.g. control attribute type not supported by msgpack) → error placeholder
             log.record("error", f"页面 {idx} 挂载失败: {ex}")
             try:
                 _set_content(error_placeholder(f"{type(ex).__name__}: {ex}"))
@@ -243,19 +248,21 @@ def build_layout(page: ft.Page):
         try:
             _init["pages"][idx].refresh()
         except RuntimeError:
-            # flet 0.86.2：首帧 patch 刚发出，子控件 parent 链可能尚未建立，
-            # refresh 的 update() 会抛 "Control must be added to the page first"。
-            # 状态在后续推送/再次切换页面时自然刷新，此处静默（不刷日志）。
+            # flet 0.86.2: the first-frame patch was just sent; the child's parent chain
+            # may not be established yet, so refresh's update() raises
+            # "Control must be added to the page first". State refreshes naturally on
+            # later pushes or page switches; swallow silently here (no log).
             pass
         except Exception as ex:
             log.record("warn", f"页面 {idx} refresh 失败: {ex}")
 
-    # ── 切换页面函数 ──
+    # ── Page switch function ──
     def switch_page(idx: int):
         nonlocal current_index
         if not _init["done"]:
-            # 骨架阶段导航点击直接忽略：绝不能在此同步执行 ensure_initialized
-            # （重库导入/页面构建会阻塞 UI 线程数秒）。导航在骨架结束后自然可用。
+            # Ignore nav clicks during the skeleton phase: never run ensure_initialized
+            # synchronously here (heavy imports/page builds would block the UI thread for
+            # seconds). Navigation becomes available naturally once the skeleton finishes.
             return
         pages = _init["pages"]
         if idx not in pages:
@@ -280,25 +287,23 @@ def build_layout(page: ft.Page):
                 except Exception:
                     pass
             else:
-                # 未构建：先显示骨架占位，后台构建完成后替换（两阶段渲染）
+                # Not yet built: show the skeleton placeholder first, then replace after the background build (two-phase render)
                 _start_loading_animation()
                 _set_content(_make_placeholder())
                 page.run_task(load_content, idx)
 
-    # ══════════════════════════════════════════════════════════
-    # 品牌区（top_row 左侧，250px 定宽）
-    # ══════════════════════════════════════════════════════════
+    # ── Brand area (top_row left side, fixed 250px width) ──
 
-    # ── 品牌图标: Logo 图片（material/logo.png；骨架阶段呼吸动画经 _animate_loading）──
+    # ── Brand icon: logo image (material/logo.png; breathing animation during skeleton via _animate_loading) ──
     brand_icon_box = ft.Container(
         content=ft.Image(
             src=str(project_root / "material/logo.png"),
             width=40, height=40,
-            fit=ft.BoxFit.CONTAIN,  # flet 0.86.2：ImageFit 已移除，用 BoxFit
+            fit=ft.BoxFit.CONTAIN,  # flet 0.86.2: ImageFit removed; use BoxFit
             filter_quality=ft.FilterQuality.HIGH,
         ),
         border_radius=Radius.SM,
-        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,  # 圆角裁剪图片
+        clip_behavior=ft.ClipBehavior.ANTI_ALIAS,  # clip image to rounded corners
         width=40, height=40,
         alignment=ft.Alignment.CENTER,
         shadow=_shadow("low"),
@@ -306,7 +311,7 @@ def build_layout(page: ft.Page):
         animate_scale=ft.Animation(800, ft.AnimationCurve.EASE),
     )
 
-    # ── 品牌文本列: 标题 + 副标题 ──
+    # ── Brand text column: title + subtitle ──
     brand_text_column = ft.Column(
         [
             ft.Text("Modular Translator", size=Typography.HEADING,
@@ -318,14 +323,14 @@ def build_layout(page: ft.Page):
         spacing=0,
     )
 
-    # ── 品牌 Row: 图标 + 文本（logo 与右侧文字组件垂直居中对齐）──
+    # ── Brand Row: icon + text (logo vertically centered with the right text column) ──
     brand_row = ft.Row(
         [brand_icon_box, brand_text_column],
         spacing=10,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
-    # ── 品牌区容器 (定宽 250px，固定高 68px，右+下边框) ──
+    # ── Brand container (fixed width 250px, fixed height 68px, right + bottom border) ──
     brand_container = ft.Container(
         content=brand_row,
         bgcolor=Palette.SURFACE,
@@ -338,11 +343,9 @@ def build_layout(page: ft.Page):
         padding=ft.Padding.all(16),
     )
 
-    # ══════════════════════════════════════════════════════════
-    # 顶栏（右列上方，固定高 = 品牌区一半，宽占满右列剩余空间）
-    # ══════════════════════════════════════════════════════════
+    # ── Top bar (above the right column; fixed height = half the brand area, width fills the remaining right-column space) ──
 
-    # ── 最大化/还原切换（最大化按钮 + 双击拖拽区共用）──
+    # ── Maximize/restore toggle (shared by the maximize button and the double-click drag area) ──
     def _toggle_maximize(e=None):
         w = page.window
         w.maximized = not w.maximized
@@ -351,17 +354,17 @@ def build_layout(page: ft.Page):
         try:
             maximize_button.update()
         except RuntimeError:
-            pass  # 未挂载 page 时跳过推送
-        page.update()  # 推送 window.maximized 变化到客户端（与最小化按钮一致）
+            pass  # skip push when not mounted to page
+        page.update()  # push window.maximized changes to the client (same as the minimize button)
 
-    # ── 可拖拽空白区（左），双击切换最大化/还原 ──
+    # ── Draggable blank area (left); double-click toggles maximize/restore ──
     drag_area = ft.WindowDragArea(
         content=ft.Container(expand=True),
         expand=True,
         on_double_tap=_toggle_maximize,
     )
 
-    # ── 最大化按钮 ──
+    # ── Maximize button ──
     maximize_button = ft.IconButton(
         icon=ft.Icons.ASPECT_RATIO if page.window.maximized else ft.Icons.CROP_SQUARE,
         icon_size=18,
@@ -371,7 +374,7 @@ def build_layout(page: ft.Page):
         style=ft.ButtonStyle(padding=ft.Padding.all(6)),
     )
 
-    # ── 最小化按钮 ──
+    # ── Minimize button ──
     minimize_button = ft.IconButton(
         icon=ft.Icons.MINIMIZE,
         icon_size=18,
@@ -381,10 +384,10 @@ def build_layout(page: ft.Page):
         style=ft.ButtonStyle(padding=ft.Padding.all(6)),
     )
 
-    # ── 关闭按钮 ──
-    # 走 window.close() 发起原生关闭请求：prevent_close=True 会拦截并经
-    # window.on_event 以 WindowEventType.CLOSE 报告（flet 0.86.2 window.py
-    # 文档保证），由 APP.py 统一执行 shutdown + destroy，避免绕过清理。
+    # ── Close button ──
+    # Uses window.close() to issue a native close request: prevent_close=True intercepts it
+    # and reports it via window.on_event as WindowEventType.CLOSE (guaranteed by the flet
+    # 0.86.2 window.py docs); APP.py then runs shutdown + destroy uniformly, avoiding cleanup bypass.
     async def close_window(e):
         await page.window.close()
 
@@ -397,20 +400,20 @@ def build_layout(page: ft.Page):
         style=ft.ButtonStyle(padding=ft.Padding.all(6)),
     )
 
-    # ── 窗口控制按钮行 ──
+    # ── Window control button row ──
     window_controls_row = ft.Row(
         [minimize_button, maximize_button, close_button],
         spacing=4,
     )
 
-    # ── 顶栏 Row: 拖拽区 + 窗口控制 ──
+    # ── Top-bar Row: drag area + window controls ──
     app_bar_row = ft.Row(
         [drag_area, window_controls_row],
         spacing=0,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
-    # ── 顶栏容器 (固定高 34px = 品牌区一半，宽度由右列 STRETCH 占满) ──
+    # ── Top-bar container (fixed height 34px = half the brand area; width filled by the right column's STRETCH) ──
     app_bar = ft.Container(
         content=app_bar_row,
         height=Layout.APP_BAR_HEIGHT,
@@ -419,9 +422,7 @@ def build_layout(page: ft.Page):
         border=ft.Border.only(bottom=ft.BorderSide(1, Palette.BORDER)),
     )
 
-    # ══════════════════════════════════════════════════════════
-    # 导航栏（左列，250px 定宽，expand 占品牌区以下剩余高度）
-    # ══════════════════════════════════════════════════════════
+    # ── Navigation rail (left column, fixed 250px, expand fills remaining height below the brand area) ──
 
     # ── NavigationRail ──
     rail = ft.NavigationRail(
@@ -430,7 +431,7 @@ def build_layout(page: ft.Page):
         min_width=80,
         min_extended_width=180,
         group_alignment=-0.9,
-        extended=True,  # 展开填满 250px 容器，避免折叠态（仅图标）在右侧留大片空白
+        extended=True,  # extended to fill the 250px container, avoiding a big blank area on the right in collapsed (icon-only) mode
         destinations=[
             ft.NavigationRailDestination(
                 icon=ft.Icons.MIC,
@@ -473,52 +474,51 @@ def build_layout(page: ft.Page):
         bgcolor=Palette.SURFACE,
     )
 
-    # ── 导航容器 ──
+    # ── Navigation container ──
     nav_rail_container = ft.Container(
         content=rail,
         padding=ft.Padding.only(left=16, top=12, right=16),
         bgcolor=Palette.SURFACE,
         border=ft.Border.only(right=ft.BorderSide(1, Palette.BORDER)),
         width=Layout.SIDEBAR_WIDTH,
-        expand=True,  # 左列 Column 中占满品牌区以下的剩余高度
+        expand=True,  # fills the remaining height below the brand area in the left Column
     )
 
-    # ══════════════════════════════════════════════════════════
-    # 根 Row — 左列（品牌区 + 导航栏）| 右列（顶栏 + 内容区）
-    # ══════════════════════════════════════════════════════════
+    # ── Root Row — left column (brand + nav) | right column (top bar + content) ──
 
     left_column = ft.Column(
         [brand_container, nav_rail_container],
         spacing=0,
-        # 固定侧栏宽度，不再 expand 抢占一半窗口宽（否则侧栏右侧留大片空白）
+        # Fixed sidebar width, no longer expand (which would grab half the window and
+        # leave a big blank area to the right of the sidebar)
         width=Layout.SIDEBAR_WIDTH,
     )
     right_column = ft.Column(
         [app_bar, content_area],
         spacing=0, expand=True,
-        # 子项横向拉伸：顶栏宽度占满剩余空间（内容区亦全宽）
+        # Stretch children horizontally: the top bar fills the remaining space (content area full width too)
         horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
     root_row = ft.Row(
         [left_column, right_column],
         spacing=0, expand=True,
-        # 纵向拉伸：固定宽度侧栏铺满窗口高度
+        # Stretch vertically: the fixed-width sidebar fills the window height
         vertical_alignment=ft.CrossAxisAlignment.STRETCH,
     )
 
-    # ── 根 Container — 最外层 ──
+    # ── Root Container — outermost ──
     root_container = ft.Container(
         content=root_row,
         expand=True,
         bgcolor=Palette.BG,
     )
 
-    # ── 挂载到 page ──
+    # ── Mount to page ──
     page.add(root_container)
 
-    # ── 两阶段渲染：首帧推送外壳 + 骨架占位（APP.py 的 page.update()），
-    #    随后在后台构建首页完整树并替换内容区 ──
+    # ── Two-phase render: first frame pushes the shell + skeleton placeholder (APP.py's page.update()),
+    #    then the home page's full tree is built in the background and replaces the content area ──
     _start_loading_animation()
     page.run_task(load_content, 0)
 

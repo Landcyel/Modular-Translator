@@ -1,13 +1,15 @@
-"""Modular Translator CPU 版打包脚本（PyInstaller onedir 绿色目录）。
+"""Modular Translator CPU packaging script (PyInstaller onedir portable directory).
 
-必须使用项目 .venv 的 Python 运行（解释器锁定，防止全局 Python 混入旧版依赖）：
+Must run with the project .venv's Python (interpreter pinning prevents a global
+Python from mixing in old dependencies):
 
-  .venv\\Scripts\\python.exe build/build_cpu.py                  # 默认输出 D:\\ModularTranslator_cpu
-  .venv\\Scripts\\python.exe build/build_cpu.py --verify --smoke  # 构建后校验 + 启动冒烟
+  .venv\\Scripts\\python.exe build/build_cpu.py                  # default output D:\\ModularTranslator_cpu
+  .venv\\Scripts\\python.exe build/build_cpu.py --verify --smoke  # verify after build + startup smoke test
   .venv\\Scripts\\python.exe build/build_cpu.py --no-engine --output-dir D:\\MT-cpu
 
-CPU 版内容：torch-cpu 运行时 + llama-release CPU 子集 + FFmpeg(ffmpeg/ffprobe)，
-模型与角色资产外置（由 tools/make_model_volumes.py 制作分卷）。
+CPU build contents: torch-cpu runtime + llama-release CPU subset + FFmpeg
+(ffmpeg/ffprobe); models and character assets stay external (multi-volume
+archives made by tools/make_model_volumes.py).
 """
 
 import argparse

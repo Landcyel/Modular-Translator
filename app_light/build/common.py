@@ -1,18 +1,23 @@
-"""Modular Translator 打包共享逻辑（CPU/CUDA 双版本共用，v3）。
+"""Modular Translator packaging shared logic (shared by both CPU/CUDA versions, v3).
 
-本模块由 build/build_cpu.py 与 build/build_cuda.py 共同调用，
-实现 PyInstaller onedir 绿色目录打包的完整流程（构建 -> 资源拷贝 -> 校验 -> 冒烟）。
+This module is called by both build/build_cpu.py and build/build_cuda.py and
+implements the full PyInstaller onedir portable-directory packaging flow
+(build -> resource copy -> verify -> smoke test).
 
-相对旧版 build_package.py 的关键修正（基于打包产物运行日志实证的导入错误）：
-1. 解释器锁定：必须用项目 .venv 运行构建，杜绝全局 Python 混入旧版依赖
-   （曾把 numpy 2.4.6 混入产物，导致 _multiarray_umath DLL 加载失败）；
-2. vendor 导入自动扫描：AST 解析 core/gsv/vendor 全部 import 生成 hidden imports，
-   不再依赖手写清单（曾漏收 ffmpeg-python 导致运行时 "No module named 'ffmpeg'"）；
-3. --collect-data soundfile：收集 libsndfile_x64.dll（曾缺失导致 import soundfile 失败）；
-4. 不再排除 faster_whisper：vendor ASR 工具顶层导入它，排除会导致 ImportError；
-5. PyInstaller 中间产物隔离到 build/pyinstaller-<mode>/，不污染项目根。
+Key corrections versus the old build_package.py (validated against import errors
+observed in packaged-build runtime logs):
+1. Interpreter pinning: the build must run under the project .venv to keep a
+   global Python from mixing in old dependencies.
+2. Vendor import auto-scan: AST-parses all imports under core/gsv/vendor to
+   generate hidden imports instead of a hand-written manifest.
+3. --collect-data soundfile: collects libsndfile_x64.dll.
+4. faster_whisper is no longer excluded: the vendor ASR tool imports it at top
+   level, so excluding it would cause an ImportError.
+5. PyInstaller intermediate artifacts are isolated under build/pyinstaller-<mode>/,
+   keeping the project root clean.
 
-本脚本零第三方依赖（仅标准库），须用项目 .venv 的 Python 运行。
+This script has zero third-party dependencies (standard library only) and must be
+run with the project .venv's Python.
 """
 
 from __future__ import annotations
@@ -28,12 +33,11 @@ import time
 import zipfile
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# 路径常量
-# ---------------------------------------------------------------------------
+# ── Path constants ──
 
-# build/common.py -> 项目根（脚本目录不固定：app_light/build/ 或分支根 build/）
-# 从脚本所在目录向上找第一个同时含 configs/ 与 APP.py 的应用根
+# build/common.py -> project root (script directory is not fixed: app_light/build/
+# or a branch root build/). Search upward from the script directory for the first
+# app root containing both configs/ and APP.py.
 def _find_app_root(start: Path) -> Path:
     for cand in (start, *start.parents):
         if (cand / "configs").is_dir() and (cand / "APP.py").is_file():
@@ -49,13 +53,13 @@ LOGO_FILE = ROOT / "material" / "logo.png"
 PROJECT_VENV = ROOT / ".venv"
 VENV_PYTHON = PROJECT_VENV / "Scripts" / "python.exe"
 
-# 产物根需外置的用户可编辑/品牌内容
+# User-editable/branding content kept external at the output root
 COPY_DIRS = ["configs", "material"]
 
-# 仅复刻目录结构（空目录、不拷贝文件）的运行期目录
+# Runtime directories for which only the structure is replicated (empty dirs, no files copied)
 STRUCTURE_DIRS = ["dependencies", "output", "temp", "logs", "characters"]
 
-# 依赖源目录
+# Dependency source directories
 VENDOR_DIR = ROOT / "core" / "gsv" / "vendor"
 MOSS_SRC = ROOT / "dependencies" / "MOSS-Transcribe-Diarize"
 RUNTIME_SRC = ROOT / "dependencies" / "runtime"
@@ -64,34 +68,35 @@ FFMPEG_SRC = ROOT / "dependencies" / "FFmpeg"
 WHISPER_CUDA_SRC = ROOT / "dependencies" / "fasterwisper-cuda"
 DEPS_VENV_SP = ROOT / "dependencies" / "venv" / "Lib" / "site-packages"
 
-# PyInstaller 中间产物隔离目录（spec/work/dist 全部落在 build/ 下）
+# PyInstaller intermediate-artifact isolation dir (spec/work/dist all under build/)
 PYINSTALLER_BUILD_DIR = ROOT / "build" / "pyinstaller"
 
-# ---------------------------------------------------------------------------
-# 依赖清单
-# ---------------------------------------------------------------------------
+# ── Dependency manifest ──
 
-# 运行期动态导入/标准库兜底，必须无条件加入 hidden imports（audioop 由
-# audioop-lts 提供，Python 3.13+ 已从标准库移除，pydub 依赖）
+# Runtime dynamic imports / stdlib fallbacks that must always be in hidden imports
+# (audioop is provided by audioop-lts; removed from the stdlib in Python 3.13+,
+# pydub depends on it)
 EXTRA_HIDDEN_IMPORTS = [
     "audioop",                                       # pydub
-    "pickletools",                                   # GSV torch.load 链路
+    "pickletools",                                   # GSV torch.load chain
     "transformers.configuration_utils",              # PretrainedConfig
-    "transformers.models.auto.configuration_auto",   # AutoConfig 动态解析
-    "transformers.generation.configuration_utils",   # 生成配置兜底
+    "transformers.models.auto.configuration_auto",   # AutoConfig dynamic resolution
+    "transformers.generation.configuration_utils",   # generation config fallback
 ]
 
-# MOSS 本地包主链路模块（不收集 web_cli/server 以减体积）
+# MOSS local package main-chain modules (web_cli/server not collected to reduce size)
 MOSS_HIDDEN_IMPORTS = [
     "moss_transcribe_diarize",
     "moss_transcribe_diarize.app.model_runner",
     "moss_transcribe_diarize.subtitle",
 ]
 
-# 统一排除：torch 系由外挂 runtime 提供（app/torch_runtime.py 运行时注入）；
-# 其余确认无运行时引用（含 vendor 顶层导入）。
-# 警示：列表内任何包若被 core/gsv/vendor 顶层 import，即为运行时炸弹
-# （曾误排除 matplotlib，lr_schedulers.py 顶层导入导致 GSV 服务启动失败）。
+# Unified excludes: torch family is provided by the external runtime (injected at
+# runtime by app/torch_runtime.py); the rest are confirmed to have no runtime
+# references (including vendor top-level imports).
+# Warning: any package in this list that is top-level imported by core/gsv/vendor
+# is a runtime bomb — e.g. matplotlib must NOT be here because lr_schedulers.py
+# imports it at top level and GSV startup would fail.
 EXCLUDES = [
     "torch",
     "torchaudio",
@@ -100,12 +105,11 @@ EXCLUDES = [
     "hf_xet",
 ]
 
-# 多依赖源时版本必须一致的关键包（混装会导致二进制 DLL 加载失败）
+# Key packages whose versions must match across dependency sources (mixing would
+# break binary DLL loading)
 KEY_PACKAGES = ["numpy", "scipy", "av", "soundfile", "transformers", "librosa"]
 
-# ---------------------------------------------------------------------------
-# 基础工具
-# ---------------------------------------------------------------------------
+# ── Basic utilities ──
 
 
 def step(msg: str) -> None:
@@ -113,27 +117,30 @@ def step(msg: str) -> None:
 
 
 def _rmtree_readonly(func, path, exc) -> None:
-    """rmtree 遇到只读文件时去掉只读属性并重试。"""
+    """When rmtree hits a read-only file, clear the read-only attribute and retry."""
     os.chmod(path, stat.S_IWRITE)
     func(path)
 
 
 def force_rmtree(path: Path) -> None:
-    """删除目录树，自动处理 Windows 只读文件。"""
+    """Delete a directory tree, handling Windows read-only files automatically."""
     shutil.rmtree(path, onexc=_rmtree_readonly)
 
 
-# 重建时保留的产物顶层目录（用户资产：角色/模型，体积大且重新部署成本高）
+# Output top-level dirs kept across rebuilds (user assets: characters/models,
+# large and expensive to redeploy)
 KEEP_OUTPUT_DIRS = {"characters", "dependencies"}
-# dependencies/ 下由打包脚本管理的子目录（清理时删除，按当前模式重拷）
+# Subdirs under dependencies/ managed by the packaging script (deleted on clean,
+# recopied per mode)
 MANAGED_DEPS_SUBDIRS = {"FFmpeg", "llama-release"}
-# runtime/ 下由打包脚本管理的子目录（同上）
+# Subdirs under runtime/ managed by the packaging script (same as above)
 MANAGED_RUNTIME_SUBDIRS = {"torch-cpu", "torch-cuda"}
 
 
 def _clean_managed_deps(deps_dir: Path) -> None:
-    """删除 dependencies/ 下受管子目录；models/、MOSS-Transcribe-Diarize/、
-    venv/、requirements/、fasterwisper-cuda/（用户可选放置 DLL）等保留。"""
+    """Delete the managed subdirs under dependencies/; keep models/,
+    MOSS-Transcribe-Diarize/, venv/, requirements/, fasterwisper-cuda/ (where
+    users may place DLLs), etc."""
     for name in MANAGED_DEPS_SUBDIRS:
         p = deps_dir / name
         if p.exists():
@@ -147,11 +154,12 @@ def _clean_managed_deps(deps_dir: Path) -> None:
 
 
 def clean_output_dir(dst_dir: Path) -> None:
-    """清理旧产物，但保留用户已放置的 characters/ 与 dependencies/ 资产。
+    """Clean the old output, but keep user-placed characters/ and dependencies/ assets.
 
-    dependencies/ 下受管子目录（FFmpeg / llama-release / runtime/torch-*）
-    一并删除，由本次构建按当前模式重拷；模型、角色、可选 DLL 等非受管
-    内容原样保留，避免重建后需重新部署 GB 级资产。
+    Managed subdirs under dependencies/ (FFmpeg / llama-release / runtime/torch-*)
+    are also deleted and re-copied by this build per mode; unmanaged content such
+    as models, characters and optional DLLs is kept as-is, avoiding redeployment
+    of GB-scale assets after a rebuild.
     """
     if not dst_dir.exists():
         return
@@ -167,7 +175,8 @@ def clean_output_dir(dst_dir: Path) -> None:
             child.unlink()
 
 
-# PyInstaller hook 目录（官方 + contrib），用于判断库是否已有收集 hook
+# PyInstaller hook dirs (official + contrib), used to check whether a library
+# already has a collect hook
 PYINSTALLER_HOOK_DIR = PROJECT_VENV / "Lib" / "site-packages" / "PyInstaller" / "hooks"
 CONTRIB_HOOK_DIR = (
     PROJECT_VENV / "Lib" / "site-packages" / "_pyinstaller_hooks_contrib" / "stdhooks"
@@ -175,24 +184,25 @@ CONTRIB_HOOK_DIR = (
 
 
 def has_pyinstaller_hook(name: str, site_packages: list[Path]) -> bool:
-    """判断库是否有 PyInstaller hook（官方 / contrib / 包内 __pyinstaller 目录）。
+    """Check whether a library has a PyInstaller hook (official / contrib / in-package __pyinstaller dir).
 
-    无 hook 的库（如 jieba_fast）子模块/数据文件默认收集不完整，
-    运行时 No module named '<pkg>.sub' 或数据缺失，需 --collect-all 兜底。
+    Libraries without a hook (e.g. jieba_fast) collect submodules/data incompletely
+    by default, causing runtime "No module named '<pkg>.sub'" or missing data;
+    they need a --collect-all fallback.
     """
     if (PYINSTALLER_HOOK_DIR / f"hook-{name}.py").is_file():
         return True
     if (CONTRIB_HOOK_DIR / f"hook-{name}.py").is_file():
         return True
-    # 包内自带 hook（如 pypinyin/__pyinstaller/hook-pypinyin.py）
+    # In-package hook (e.g. pypinyin/__pyinstaller/hook-pypinyin.py)
     return any((sp / name / "__pyinstaller").is_dir() for sp in site_packages)
 
 
 def require_project_venv() -> None:
-    """强制使用项目 .venv 的解释器运行构建。
+    """Force the build to run under the project .venv interpreter.
 
-    旧版脚本允许任意解释器（甚至 PATH 上的全局 Python），曾导致 numpy 2.4.6
-    混入产物、_multiarray_umath DLL 加载失败。此校验为硬约束。
+    Old scripts allowed any interpreter (even a global Python on PATH), which
+    could mix in wrong dependency versions. This check is a hard constraint.
     """
     exe = Path(sys.executable).resolve()
     if not exe.is_relative_to(PROJECT_VENV.resolve()):
@@ -210,10 +220,12 @@ def require_project_venv() -> None:
 
 
 def find_site_packages(extra_paths: bool) -> list[Path]:
-    """返回依赖源 site-packages 列表。
+    """Return the dependency-source site-packages list.
 
-    主源固定为项目 .venv（保证 numpy 等二进制包版本正确）；dependencies/venv
-    仅在显式 --extra-paths 时追加（多源时由版本一致性预检把关）。
+    The primary source is always the project .venv (ensures correct versions of
+    binary packages like numpy); dependencies/venv is appended only with an
+    explicit --extra-paths (multi-source versions are guarded by the consistency
+    precheck).
     """
     result: list[Path] = []
     main_sp = PROJECT_VENV / "Lib" / "site-packages"
@@ -225,7 +237,7 @@ def find_site_packages(extra_paths: bool) -> list[Path]:
 
 
 def package_version(site_packages: Path, name: str) -> str | None:
-    """读取指定 site-packages 中某包的 dist-info 版本。"""
+    """Read the dist-info version of a package in the given site-packages."""
     for dist in site_packages.glob(f"{name}-*.dist-info"):
         meta = dist / "METADATA"
         if meta.is_file():
@@ -236,7 +248,7 @@ def package_version(site_packages: Path, name: str) -> str | None:
 
 
 def check_key_package_consistency(site_packages: list[Path]) -> None:
-    """多依赖源时关键包版本必须一致，防止混装导致 DLL 加载失败。"""
+    """With multiple dependency sources, key package versions must match to prevent DLL load failures from mixing."""
     if len(site_packages) < 2:
         return
     for name in KEY_PACKAGES:
@@ -254,7 +266,7 @@ def check_key_package_consistency(site_packages: list[Path]) -> None:
 
 
 def import_available(name: str, site_packages: list[Path]) -> bool:
-    """判断顶层模块在任一依赖源中是否存在（用于可选依赖探测）。"""
+    """Check whether a top-level module exists in any dependency source (for optional-dependency detection)."""
     for sp in site_packages:
         if (sp / name).is_dir():
             return True
@@ -265,13 +277,13 @@ def import_available(name: str, site_packages: list[Path]) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# TorchScript 源码化（jit.script 编译需要 Python 源码）
-# ---------------------------------------------------------------------------
+# ── TorchScript source-ization (jit.script compilation needs Python source) ──
 
-# 不源码化的库：外挂 torch 系 / 二进制大库（jit 编译图不会引用其 Python 函数源码，
-# PyInstaller 正常收集进 PYZ 即可）。einops 除外——x_transformers 内部调用其
-# Python 函数（rearrange 等），可能进入 jit 编译图，须源码化。
+# Libraries not source-ized: the external torch family / large binary libs (the
+# jit compile graph won't reference their Python function source; PyInstaller
+# collecting them into the PYZ is enough). einops excepted — x_transformers calls
+# its Python functions (rearrange etc.) internally, which can enter the jit
+# graph, so it must be source-ized.
 SOURCE_SKIP = {
     "torch", "torchaudio", "numpy", "scipy", "av", "soundfile", "onnxruntime",
     "ctranslate2", "matplotlib", "PIL", "sklearn", "pandas", "sympy", "numba",
@@ -282,14 +294,14 @@ SOURCE_SKIP = {
     "inflect", "wordsegment", "typeguard", "yaml", "fast_langdetect", "split_lang",
 }
 
-# 源码化种子：GSV 的 jit.script 编译图引用 x_transformers 的 Python 函数
-# （softclamp 等），其依赖链（einx/frozendict/einops/torch_einops_utils）由
-# expand_source_closure 递归展开，一次到位。
+# Source-ization seeds: GSV's jit.script compile graph references x_transformers'
+# Python functions (softclamp etc.); its dependency chain (einx/frozendict/einops/
+# torch_einops_utils) is expanded recursively by expand_source_closure in one pass.
 SOURCE_SEEDS = ["x_transformers"]
 
 
 def _scan_pkg_imports(pkg_dir: Path) -> set[str]:
-    """AST 扫描某第三方包内全部 import，返回顶层包名集合。"""
+    """AST-scan all imports inside a third-party package, returning the set of top-level package names."""
     deps: set[str] = set()
     for py in pkg_dir.rglob("*.py"):
         try:
@@ -306,11 +318,12 @@ def _scan_pkg_imports(pkg_dir: Path) -> set[str]:
 
 
 def expand_source_closure(site_packages: list[Path], seeds: list[str]) -> list[str]:
-    """从种子库递归展开第三方 import 闭包，返回需源码化的包名（有序去重）。
+    """Recursively expand the third-party import closure from seed packages, returning the packages to source-ize (sorted, deduplicated).
 
-    ``--exclude-module`` 后 PyInstaller 不再分析被排除库的 import，其依赖链
-    必须在此显式覆盖——否则运行时 "No module named" 逐层暴露（x_transformers
-    → einx → frozendict）。递归扫描保证一次到位。
+    After ``--exclude-module`` PyInstaller no longer analyzes the excluded
+    library's imports, so its dependency chain must be covered explicitly here —
+    otherwise "No module named" surfaces layer by layer at runtime
+    (x_transformers → einx → frozendict). Recursive scanning guarantees one pass.
     """
     stdlib = set(sys.stdlib_module_names)
     closure: set[str] = set()
@@ -321,7 +334,7 @@ def expand_source_closure(site_packages: list[Path], seeds: list[str]) -> list[s
             continue
         src = next((sp / name for sp in site_packages if (sp / name).is_dir()), None)
         if src is None:
-            # 单文件模块同样源码化
+            # Single-file modules are source-ized too
             if any((sp / f"{name}.py").is_file() for sp in site_packages):
                 closure.add(name)
             continue
@@ -333,12 +346,13 @@ def expand_source_closure(site_packages: list[Path], seeds: list[str]) -> list[s
 
 
 def scan_vendor_imports(site_packages: list[Path]) -> list[str]:
-    """AST 扫描 core/gsv/vendor 下全部 import，自动生成 hidden imports。
+    """AST-scan all imports under core/gsv/vendor, auto-generating hidden imports.
 
-    vendor 代码以 --add-data 打入产物、运行时经 sys.path 动态加载，
-    PyInstaller 静态分析不可见，必须显式 hidden-import。手写清单容易漏收
-    （曾漏 ffmpeg-python），改为扫描后与手工白名单合并。
-    返回仅含已在依赖源中存在的顶层包名。
+    Vendor code is shipped via --add-data and loaded dynamically through sys.path
+    at runtime, invisible to PyInstaller's static analysis, so it must be
+    explicitly hidden-imported. A hand-written manifest is easy to under-collect;
+    scanning is merged with a manual allowlist instead.
+    Returns only top-level package names present in the dependency sources.
     """
     if not VENDOR_DIR.is_dir():
         print(f"  [警告] 未找到 GSV vendor 目录: {VENDOR_DIR}（打包后语音合成不可用）")
@@ -374,13 +388,11 @@ def scan_vendor_imports(site_packages: list[Path]) -> list[str]:
     return result
 
 
-# ---------------------------------------------------------------------------
-# 引擎包（flet 桌面引擎）准备
-# ---------------------------------------------------------------------------
+# ── Engine package (flet desktop engine) preparation ──
 
 
 def find_local_engine_cache() -> Path | None:
-    """在本机 ~/.flet/client/ 下定位引擎缓存目录。"""
+    """Locate the engine cache directory under ~/.flet/client/."""
     client_dir = Path.home() / ".flet" / "client"
     if not client_dir.is_dir():
         return None
@@ -392,7 +404,7 @@ def find_local_engine_cache() -> Path | None:
 
 
 def check_engine_zip(zip_path: Path) -> None:
-    """校验引擎包：结构 + 完整性。"""
+    """Validate the engine package: structure + integrity."""
     with zipfile.ZipFile(zip_path) as zf:
         if "flet/flet.exe" not in zf.namelist():
             sys.exit(f"[错误] 引擎包 {zip_path} 缺少 flet/flet.exe，结构不符")
@@ -402,7 +414,7 @@ def check_engine_zip(zip_path: Path) -> None:
 
 
 def build_engine_zip_from_cache(cache_dir: Path) -> Path:
-    """把本机引擎缓存目录重新打包为 build_assets/flet-windows.zip。"""
+    """Re-package the local engine cache directory into build_assets/flet-windows.zip."""
     BUILD_ASSETS.mkdir(parents=True, exist_ok=True)
     shutil.make_archive(str(ENGINE_ZIP.with_suffix("")), "zip", root_dir=str(cache_dir))
     if not ENGINE_ZIP.exists():
@@ -411,7 +423,7 @@ def build_engine_zip_from_cache(cache_dir: Path) -> Path:
 
 
 def prepare_engine(embed_engine: bool) -> Path | None:
-    """准备引擎包。返回内嵌 zip 路径；--no-engine 时返回 None。"""
+    """Prepare the engine package. Returns the embedded zip path; None with --no-engine."""
     if not embed_engine:
         step("1/8 引擎外置模式（--no-engine）")
         print("  跳过内嵌引擎；首次运行将从 GitHub 下载 flet-windows.zip 到 ~/.flet/client/")
@@ -439,9 +451,7 @@ def prepare_engine(embed_engine: bool) -> Path | None:
     return ENGINE_ZIP
 
 
-# ---------------------------------------------------------------------------
-# PyInstaller 构建
-# ---------------------------------------------------------------------------
+# ── PyInstaller build ──
 
 
 def build_pyinstaller_cmd(
@@ -452,12 +462,14 @@ def build_pyinstaller_cmd(
     source_closure: list[str],
     extra_paths: bool,
 ) -> list[str]:
-    """组装 PyInstaller 命令（CPU/CUDA 共用，依赖差异在资源拷贝阶段）。
+    """Assemble the PyInstaller command (shared by CPU/CUDA; dependency differences are in the resource-copy stage).
 
-    --paths 不显式加当前解释器的 site-packages（PyInstaller 自动搜索运行环境，
-    显式添加会触发 "Foreign Python environment" deprecation 警告）；仅加
-    MOSS 源码等非标准路径，以及 --extra-paths 时追加的 dependencies/venv。
-    site_packages 列表仅用于可选依赖探测与版本一致性预检。
+    --paths does not explicitly add the current interpreter's site-packages
+    (PyInstaller auto-searches the runtime environment; explicitly adding it
+    triggers a "Foreign Python environment" deprecation warning); only non-standard
+    paths such as the MOSS source are added, plus dependencies/venv when
+    --extra-paths is given. The site_packages list is used only for optional-
+    dependency detection and the version-consistency precheck.
     """
     build_dir = PYINSTALLER_BUILD_DIR / mode
     cmd = [
@@ -472,11 +484,11 @@ def build_pyinstaller_cmd(
         "--noconfirm",
         "--clean",
         "--collect-all", "flet",
-        "--collect-all", "flet_desktop",   # flet 库内延迟导入，静态分析收不到
+        "--collect-all", "flet_desktop",   # flet library's lazy imports are invisible to static analysis
         "--collect-all", "pydub",
-        "--collect-data", "budoux",        # split_lang 日文分词依赖；纯 Python 包内
-                                           # 数据文件（skip_nodes.json/models/*.json）
-                                           # PyInstaller 默认不收集，须显式收集
+        "--collect-data", "budoux",        # split_lang Japanese tokenizer dependency; the data files
+                                           # (skip_nodes.json/models/*.json) inside this pure-Python
+                                           # package are not collected by default; collect explicitly
     ]
 
     if extra_paths:
@@ -496,12 +508,15 @@ def build_pyinstaller_cmd(
         cmd += ["--add-data", f"{VENDOR_DIR};core/gsv/vendor"]
         print(f"  [GSV vendor] {VENDOR_DIR} -> _internal/core/gsv/vendor")
 
-    # TorchScript（torch.jit.script）编译需要 Python 源码（inspect.getsource），
-    # PyInstaller 6.x 无 --collect-source，PYZ 字节码无源码。source_closure 内的
-    # 库统一：exclude 模块收集 + add-data 源码目录打入 _internal，运行时经
-    # sys._MEIPASS（frozen 下 _internal 在 sys.path）从源码加载。
-    # 注意：exclude 后 PyInstaller 不再分析其 import，依赖链由
-    # expand_source_closure 递归覆盖（x_transformers → einx → frozendict 等）。
+    # TorchScript (torch.jit.script) compilation needs Python source
+    # (inspect.getsource); PyInstaller 6.x has no --collect-source and PYZ
+    # bytecode has no source. Libraries in source_closure are handled uniformly:
+    # exclude the module from collection + add the source directory via --add-data
+    # into _internal, loaded from source at runtime via sys._MEIPASS (under frozen,
+    # _internal is on sys.path).
+    # Note: after exclusion PyInstaller no longer analyzes their imports; the
+    # dependency chain is covered recursively by expand_source_closure
+    # (x_transformers → einx → frozendict etc.).
     for name in source_closure:
         src = next(
             (sp / name for sp in site_packages if (sp / name).is_dir()),
@@ -523,9 +538,10 @@ def build_pyinstaller_cmd(
             cmd += ["--add-data", f"{src};{name}"]
             print(f"  [源码化] {name} -> _internal/{name}/")
 
-    # 无 PyInstaller hook 的库统一 collect-all：子模块/数据/二进制一次收集，
-    # 防止运行时 No module named '<pkg>.sub'（jieba_fast.posseg 教训）或数据缺失。
-    # 源码化闭包内的库除外（已 exclude + add-data 全量拷贝）。
+    # Libraries without a PyInstaller hook get collect-all uniformly: submodules/
+    # data/binaries collected in one shot, preventing runtime "No module named
+    # '<pkg>.sub'" or missing data. Libraries in the source-ization closure are
+    # excepted (already fully copied via exclude + add-data).
     for mod in vendor_imports:
         if mod in source_closure:
             continue
@@ -555,13 +571,11 @@ def build_pyinstaller_cmd(
     return cmd
 
 
-# ---------------------------------------------------------------------------
-# 资源拷贝
-# ---------------------------------------------------------------------------
+# ── Resource copying ──
 
 
 def create_structure_dirs(src_root: Path, dst_root: Path, top_dirs: list[str]) -> None:
-    """在 dst_root 下复刻 src_root 中 top_dirs 的目录结构（仅建空目录）。"""
+    """Replicate the directory structure of top_dirs from src_root under dst_root (empty dirs only)."""
     for name in top_dirs:
         src = src_root / name
         dst = dst_root / name
@@ -578,10 +592,10 @@ def create_structure_dirs(src_root: Path, dst_root: Path, top_dirs: list[str]) -
 
 
 def generate_icon(dst_dir: Path) -> None:
-    """构建期显式生成产物 material/logo.ico（PIL 从 logo.png 转换）。
+    """Explicitly generate the output material/logo.ico at build time (PIL conversion from logo.png).
 
-    flet 0.86.2 Window.icon 仅支持 .ico；构建期生成使产物自带图标文件，
-    运行时不依赖 PIL/临时目录。
+    flet 0.86.2 Window.icon supports .ico only; generating at build time gives
+    the output a bundled icon file so runtime needs no PIL/temp directory.
     """
     png = dst_dir / "material" / "logo.png"
     ico = dst_dir / "material" / "logo.ico"
@@ -611,11 +625,11 @@ def copy_configs(dst_dir: Path) -> None:
             force_rmtree(dst)
         shutil.copytree(src, dst)
         print(f"  {name}/ -> {dst}")
-    generate_icon(dst_dir)  # material 拷贝后显式生成任务栏图标
+    generate_icon(dst_dir)  # explicitly generate the taskbar icon after the material copy
 
 
 def copy_ffmpeg(dst_dir: Path) -> None:
-    """只拷贝 ffmpeg.exe + ffprobe.exe，跳过 ffplay.exe（Windows 不需要）。"""
+    """Copy only ffmpeg.exe + ffprobe.exe, skipping ffplay.exe (not needed on Windows)."""
     step("5/8 拷贝精简 FFmpeg（仅 ffmpeg + ffprobe）")
     src_dir = FFMPEG_SRC
     dst = dst_dir / "dependencies" / "FFmpeg"
@@ -638,7 +652,7 @@ def copy_ffmpeg(dst_dir: Path) -> None:
 
 
 def _is_llama_cpu_file(name: str) -> bool:
-    """判断 llama-release 文件是否属于 CPU 运行所需（排除 CUDA 专用文件）。"""
+    """Determine whether a llama-release file is needed for CPU runs (exclude CUDA-only files)."""
     lower = name.lower()
     if lower.startswith("cublas") or lower.startswith("cudart"):
         return False
@@ -648,7 +662,7 @@ def _is_llama_cpu_file(name: str) -> bool:
 
 
 def copy_llama_release(mode: str, dst_dir: Path) -> None:
-    """按模式拷贝 llama-release：cpu 只拷 CPU 子集（约 44MB），cuda 拷完整（约 667MB）。"""
+    """Copy llama-release by mode: cpu copies only the CPU subset (~44MB), cuda copies the full set (~667MB)."""
     if mode == "cpu":
         step("5.5/8 拷贝 llama-release CPU 子集")
     else:
@@ -676,7 +690,7 @@ def copy_llama_release(mode: str, dst_dir: Path) -> None:
 
 
 def copy_torch_runtime(mode: str, include_cpu_fallback: bool, dst_dir: Path) -> None:
-    """按模式拷贝 torch 运行时（app/torch_runtime.py 运行时自动选择）。"""
+    """Copy the torch runtime by mode (selected automatically at runtime by app/torch_runtime.py)."""
     runtime_dst = dst_dir / "dependencies" / "runtime"
 
     if mode == "cpu":
@@ -684,7 +698,7 @@ def copy_torch_runtime(mode: str, include_cpu_fallback: bool, dst_dir: Path) -> 
         _copy_runtime_dir("torch-cpu", runtime_dst)
         return
 
-    # cuda 模式
+    # cuda mode
     step("5.6/8 拷贝 torch-cuda 运行时")
     _copy_runtime_dir("torch-cuda", runtime_dst)
     if include_cpu_fallback:
@@ -708,9 +722,10 @@ def _copy_runtime_dir(name: str, runtime_dst: Path) -> None:
 
 
 def copy_whisper_cuda(enable: bool, dst_dir: Path) -> None:
-    """CUDA 版可选打入 fasterwisper-cuda/（CTranslate2 的 CUDA DLL，约 1.3GB）。
+    """Optionally bundle fasterwisper-cuda/ for the CUDA build (CTranslate2 CUDA DLLs, ~1.3GB).
 
-    未启用时也确保产物中存在该空目录，作为用户后续放置 DLL 的固定位置。
+    When not enabled, still ensure the empty directory exists in the output as the
+    fixed location where users can place DLLs later.
     """
     dst = dst_dir / "dependencies" / "fasterwisper-cuda"
     if not enable:
@@ -793,9 +808,7 @@ def size_report(engine_zip: Path | None, mode: str, dst_dir: Path) -> None:
     print(f"\n构建完成: {dst_dir / 'ModularTranslator.exe'}")
 
 
-# ---------------------------------------------------------------------------
-# 构建后校验与冒烟测试
-# ---------------------------------------------------------------------------
+# ── Post-build verification and smoke test ──
 
 
 def verify_package(
@@ -804,11 +817,11 @@ def verify_package(
     dst_dir: Path,
     source_closure: list[str],
 ) -> bool:
-    """构建后校验关键模块/二进制依赖是否已打入产物（文件级检查）。"""
+    """Verify after build that key modules/binary dependencies made it into the output (file-level checks)."""
     step("8/8 校验产物关键依赖")
     ok = True
 
-    # 1. Analysis TOC 关键模块检查
+    # 1. Key-module check against the Analysis TOC
     analysis_toc = PYINSTALLER_BUILD_DIR / mode / "work" / "ModularTranslator" / "Analysis-00.toc"
     toc_text = ""
     if analysis_toc.exists():
@@ -828,7 +841,7 @@ def verify_package(
         "ffmpeg",
         "soundfile",
         "faster_whisper",
-        "matplotlib",  # vendor lr_schedulers.py 顶层导入，曾漏排除导致 GSV 失败
+        "matplotlib",  # vendor lr_schedulers.py imports it at top level
     ]
     for mod in must_have_modules:
         found = f"'{mod}'" in toc_text or f'"{mod}"' in toc_text
@@ -836,22 +849,24 @@ def verify_package(
         if not found:
             ok = False
 
-    # 2. 产物文件级检查（直接验证二进制/数据文件是否在包内）。
-    #    纯 Python 模块（ffmpeg/faster_whisper/soundfile 本体）编译进 PYZ，
-    #    不落目录，由上方 toc 检查覆盖；此处只查二进制与数据。
+    # 2. Output file-level checks (verify binary/data files are in the package).
+    #    Pure-Python modules (ffmpeg/faster_whisper/soundfile themselves) compile
+    #    into the PYZ and don't land as directories; they're covered by the TOC
+    #    check above. Only binaries and data are checked here.
     internal = dst_dir / "_internal"
     file_checks: list[tuple[Path, str, bool]] = [
-        (internal / "numpy" / "_core", "_multiarray_umath*.pyd", True),      # numpy C 扩展
-        (internal / "numpy.libs", "*.dll", True),                            # numpy 依赖 DLL（BLAS）
-        (internal / "_soundfile_data", "libsndfile*.dll", True),             # soundfile 数据 DLL（顶层包）
-        (internal / "av.libs", "*.dll", True),                               # av 依赖 DLL
-        (internal / "moss_transcribe_diarize", None, False),                 # MOSS 包
-        (internal / "core" / "gsv" / "vendor", None, False),                 # GSV vendor 数据
-        (internal / "budoux", "skip_nodes.json", True),                      # split_lang 分词数据
-        (internal / "jieba_fast" / "posseg", "__init__.py", True),           # 文本前端词性标注
-        (internal / "jieba_fast", "dict.txt", True),                         # jieba_fast 词典
+        (internal / "numpy" / "_core", "_multiarray_umath*.pyd", True),      # numpy C extension
+        (internal / "numpy.libs", "*.dll", True),                            # numpy dependency DLLs (BLAS)
+        (internal / "_soundfile_data", "libsndfile*.dll", True),             # soundfile data DLL (top-level package)
+        (internal / "av.libs", "*.dll", True),                               # av dependency DLLs
+        (internal / "moss_transcribe_diarize", None, False),                 # MOSS package
+        (internal / "core" / "gsv" / "vendor", None, False),                 # GSV vendor data
+        (internal / "budoux", "skip_nodes.json", True),                      # split_lang tokenizer data
+        (internal / "jieba_fast" / "posseg", "__init__.py", True),           # text-frontend POS tagging
+        (internal / "jieba_fast", "dict.txt", True),                         # jieba_fast dictionary
     ]
-    # 源码化闭包内每个库须有源码文件（jit.script 编译依赖）
+    # Every library in the source-ization closure must have source files
+    # (jit.script compilation dependency)
     for name in source_closure:
         pkg_dir = internal / name
         if (pkg_dir / "__init__.py").exists() or (pkg_dir / f"{name}.py").exists():
@@ -891,12 +906,14 @@ def verify_package(
 
 
 def smoke_test(dst_dir: Path, wait_seconds: float = 15.0) -> None:
-    """启动产物验证导入无错误：进程存活 + 无新增导入类错误日志。
+    """Launch the built executable to verify imports are clean: process stays alive + no new import-type error logs.
 
-    应用启动后会初始化服务（MOSS/GSV 等），若打包存在导入问题，
-    服务启动失败会写入 logs/app-error-*.log，可直接暴露历史导入错误。
-    仅导入类错误（No module named / DLL load failed 等）判定失败；
-    模型/数据未部署产生的错误只打印警告（外置模型不随包分发）。
+    After startup the app initializes services (MOSS/GSV etc.); if the package has
+    import problems, service startup failures are written to logs/app-error-*.log
+    and expose the import errors directly. Only import-type errors (No module
+    named / DLL load failed etc.) count as failures; errors from undeployed
+    models/data only print warnings (external models are not distributed with the
+    package).
     """
     step("9/8 冒烟测试：启动产物验证导入无错误")
     logs_dir = dst_dir / "logs"
@@ -935,9 +952,7 @@ def smoke_test(dst_dir: Path, wait_seconds: float = 15.0) -> None:
     print(f"  [OK] 进程存活 {wait_seconds:.0f} 秒且无导入类错误日志")
 
 
-# ---------------------------------------------------------------------------
-# 主流程
-# ---------------------------------------------------------------------------
+# ── Main flow ──
 
 
 def add_common_args(ap: argparse.ArgumentParser) -> None:
@@ -1026,7 +1041,8 @@ def build(
     step("2.5/8 将 PyInstaller 产物移动到目标目录")
     dst_dir.parent.mkdir(parents=True, exist_ok=True)
     if dst_dir.exists():
-        # step 0 清理失败（目录被占用）时的兜底：清理但保留资产，再合并 staging
+        # Fallback when the step-0 clean failed (directory in use): clean but keep
+        # assets, then merge staging
         clean_output_dir(dst_dir)
         for item in staging.iterdir():
             shutil.move(str(item), str(dst_dir))

@@ -1,20 +1,18 @@
-"""可复用 UI 组件 — 精修版。
+"""Reusable UI components — refined edition.
 
-新增：
-- _shadow() 阴影辅助
-- glow_dot() 带光晕的状态指示点
-- panel_header() 统一面板标题行
-- service_management_bar() 服务管理组件
-- toolbar_panel_header() 统一任务队列/完成任务顶栏
+Added:
+- _shadow() shadow helper
+- glow_dot() status indicator dot with a glow
+- panel_header() unified panel title row
+- service_management_bar() service management component
+- toolbar_panel_header() unified task queue / completed tasks top bar
 """
 
 import flet as ft
 from ui.theme import Palette, Radius, Anim, Typography
 
 
-# ═══════════════════════════════════════════════════════════════
-# 基础辅助
-# ═══════════════════════════════════════════════════════════════
+# ── Basic helpers ──
 
 def _icon(name: str, size: int = 20, color: str | None = None) -> ft.Icon:
     return ft.Icon(name, size=size, color=color)
@@ -36,9 +34,7 @@ def divider(color: str | None = None) -> ft.Divider:
     return ft.Divider(height=1, thickness=1, color=color or Palette.BORDER_SUBTLE)
 
 
-# ═══════════════════════════════════════════════════════════════
-# 带边框按钮 — 统一图标左对齐、文字右对齐
-# ═══════════════════════════════════════════════════════════════
+# ── Bordered button — icon left-aligned, text right-aligned ──
 
 def bordered_button(
     label: str,
@@ -48,11 +44,12 @@ def bordered_button(
     width: int | None = None,
     padding=None,
 ) -> ft.OutlinedButton:
-    """主色描边按钮（统一样式）：图标在左、文字在右。
+    """Primary-outlined button (unified style): icon on the left, text on the right.
 
-    - 未指定 ``width``：按钮按内容自适应，图标与文字相邻（不拉伸）；
-    - 指定 ``width``：按钮撑满该宽度，图标贴左缘、文字贴右缘
-      （``SPACE_BETWEEN``），与参考语种/目标语种等固定宽度控件对齐。
+    - Without ``width``: the button sizes to its content, icon and text adjacent (no stretch);
+    - With ``width``: the button fills that width, icon flush to the left edge and text to
+      the right edge (``SPACE_BETWEEN``), aligning with fixed-width controls such as
+      reference/target language pickers.
     """
     style_kwargs = dict(
         color=Palette.PRIMARY,
@@ -75,9 +72,7 @@ def bordered_button(
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# 阴影辅助
-# ═══════════════════════════════════════════════════════════════
+# ── Shadow helper ──
 
 def _shadow(level: str = "low") -> list:
     if level == "med":
@@ -100,9 +95,7 @@ def _shadow(level: str = "low") -> list:
     ]
 
 
-# ═══════════════════════════════════════════════════════════════
-# 状态指示点 — 带光晕
-# ═══════════════════════════════════════════════════════════════
+# ── Status indicator dot — with glow ──
 
 def glow_dot(
     color: str = Palette.SUCCESS,
@@ -126,9 +119,7 @@ def glow_dot(
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# 面板标题行 — 统一风格
-# ═══════════════════════════════════════════════════════════════
+# ── Panel title row — unified style ──
 
 def panel_header(
     title: str,
@@ -153,16 +144,14 @@ def panel_header(
     return ft.Row(items, spacing=10)
 
 
-# ═══════════════════════════════════════════════════════════════
-# 工具栏面板标题行 — 用于任务队列/完成任务/配置库顶栏
-# ═══════════════════════════════════════════════════════════════
+# ── Toolbar panel header — for task queue / completed / config library top bar ──
 
 def toolbar_panel_header(
     title: str,
     actions: list[ft.Control] | None = None,
     icon_name: str | None = None,
 ) -> ft.Row:
-    """统一的面板标题行：图标 + 标题 + 右侧操作按钮列表。"""
+    """Unified panel title row: icon + title + a list of action buttons on the right."""
     items = []
     if icon_name:
         items.append(
@@ -180,9 +169,7 @@ def toolbar_panel_header(
     return ft.Row(items, spacing=8)
 
 
-# ═══════════════════════════════════════════════════════════════
-# 服务管理栏组件
-# ═══════════════════════════════════════════════════════════════
+# ── Service management bar component ──
 
 def service_management_bar(
     service_type: str,           # "translate" | "transcribe"
@@ -190,37 +177,41 @@ def service_management_bar(
     status_label_ref: ft.Ref,
     start_btn_ref: ft.Ref,
     stop_btn_ref: ft.Ref,
-    backend_selector: ft.Control | None = None,  # 后端选择控件（翻译页用）
-    config_dropdown: ft.Control | None = None,   # 服务配置 Dropdown
-    extra_items: list[ft.Control] | None = None, # 其它配置选择器（第二行）
-    pre_start_actions: list[ft.Control] | None = None,  # 启停按钮组内、启动按钮左侧的操作按钮
+    backend_selector: ft.Control | None = None,  # backend selector control (translate page)
+    config_dropdown: ft.Control | None = None,   # service config Dropdown
+    extra_items: list[ft.Control] | None = None, # other config pickers (second row)
+    pre_start_actions: list[ft.Control] | None = None,  # action buttons inside the start/stop group, left of the start button
     on_start=None,
     on_stop=None,
-    merge_backend: bool = False,               # True：后端选择与启停按钮组合并为行尾复合组件（翻译页）
-    row1_cols: tuple[int, ...] = (3, 3, 3, 3),   # 状态栏各控件列跨度（12 列网格）
-    row2_cols: tuple[int, ...] = (3, 3, 3, 3),   # 配置栏各控件列跨度（12 列网格）
+    merge_backend: bool = False,               # True: merge backend selector + start/stop group into one trailing composite (translate page)
+    row1_cols: tuple[int, ...] = (3, 3, 3, 3),   # status bar column spans (12-col grid)
+    row2_cols: tuple[int, ...] = (3, 3, 3, 3),   # config bar column spans (12-col grid)
 ) -> ft.Container:
-    """服务管理组件 — ResponsiveRow 两行 12 列网格工具条。
+    """Service management component — a two-row, 12-column ResponsiveRow toolbar.
 
-    第一行（状态栏）：状态指示 + 服务配置 + 行尾操作区，各控件按 ``row1_cols``
-        占虚拟 12 列网格中的列数。行尾操作区（启停按钮组，组内右对齐贴行右边缘）：
-        merge_backend=False 时为启停按钮组单独一个单元（转写页）；
-        merge_backend=True 时后端选择与启停按钮组合并为行尾一个复合组件（翻译页）。
-    第二行（配置栏）：extra_items（翻译页的提示词/参数/规则/术语表、
-        转写页的转写参数/VAD/Hotwords），各控件按 ``row2_cols`` 占列。
+    Row 1 (status bar): status indicator + service config + trailing action area; each
+        control takes ``row1_cols`` columns of the virtual 12-col grid. The trailing area
+        (start/stop button group, right-aligned within the group against the row edge):
+        with merge_backend=False it is a single start/stop group cell (transcribe page);
+        with merge_backend=True the backend selector and start/stop group are merged into
+        one trailing composite (translate page).
+    Row 2 (config bar): extra_items (translate page prompts/args/rules/glossary, transcribe
+        page transcription args/VAD/hotwords), each control takes ``row2_cols`` columns.
 
-    两行共用同一 12 列网格，相同位置（索引）的控件左边缘水平对齐——
-    例如第一行第 2 个「服务配置」与第二行第 2 个「翻译参数/VAD」左对齐。
+    Both rows share the same 12-col grid, so controls at the same index are left-aligned
+        horizontally — e.g. the 2nd control "Service Config" in row 1 aligns with the 2nd
+        control "Translate Args / VAD" in row 2.
 
-    row1_cols / row2_cols 长度必须与实际控件数一致，且每行总和应为 12
-    （超出 12 会触发 ResponsiveRow 换行，破坏单行对齐与跨行列对齐）。
+    row1_cols / row2_cols lengths must match the actual control counts, and each row must
+        sum to 12 (exceeding 12 triggers a ResponsiveRow wrap, breaking single-row and
+        cross-row column alignment).
 
-    backend_selector: Switch 复合控件（翻译页/转写页）或 Dropdown，可选。
-    extra_items: 其它配置选择器，独立放入第二行。
-    注意（flet 0.86.2）：ResponsiveRow 要求父级提供有界宽度（页面内容区
-        STRETCH Column 内满足）；子控件宽度由列网格精确约束（相同 col
-        的控件宽度一致），勿在 row1/row2 中放入 expand/flex 控件，列宽
-        完全由 col 决定。
+    backend_selector: Switch composite (translate/transcribe page) or Dropdown; optional.
+    extra_items: other config pickers, placed independently in row 2.
+    Note (flet 0.86.2): ResponsiveRow requires the parent to provide a bounded width
+        (satisfied inside the page content area's STRETCH Column); child widths are
+        precisely constrained by the grid (same col = same width). Do not place
+        expand/flex controls in row1/row2; column widths are fully determined by col.
     """
     status_icon_map = {
         "translate": ft.Icons.TRANSLATE,
@@ -229,8 +220,8 @@ def service_management_bar(
     }
     icon = status_icon_map.get(service_type, ft.Icons.DNS)
 
-    # ── 第一行（状态栏）：状态指示（icon + 状态点 + 文字）→ 服务配置 →
-    #    后端（仅翻译页）→ 启停按钮组，控件顺序固定 ──
+    # ── Row 1 (status bar): status indicator (icon + dot + text) → service config →
+    #    backend (translate page only) → start/stop group, fixed control order ──
     row1_items = [
         ft.Row([
             _icon(icon, 16, Palette.PRIMARY),
@@ -244,8 +235,8 @@ def service_management_bar(
         ], spacing=8),
     ]
     if config_dropdown:
-        row1_items.append(config_dropdown)   # 第 2 位：与第二行第 2 个配置左对齐
-    # 启停按钮组：行尾固定列 + 组内右对齐（贴行右边缘）
+        row1_items.append(config_dropdown)   # 2nd position: left-aligned with the 2nd config in row 2
+    # Start/stop group: fixed trailing column + right-aligned within the group (against the row edge)
     action_row = ft.Row([
         *(pre_start_actions or []),
         ft.TextButton(
@@ -261,7 +252,7 @@ def service_management_bar(
             style=ft.ButtonStyle(color=Palette.ERROR),
         ),
     ], spacing=8, alignment=ft.MainAxisAlignment.END)
-    # 翻译页（merge_backend=True）：后端选择 + 启停按钮组合并为行尾一个复合组件
+    # Translate page (merge_backend=True): backend selector + start/stop group merged into one trailing composite
     if merge_backend and backend_selector:
         row1_items.append(
             ft.Row([backend_selector, action_row], spacing=12,
@@ -284,7 +275,7 @@ def service_management_bar(
     row1 = ft.ResponsiveRow(row1_items, spacing=8,
                             vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-    # ── 第二行（配置栏）：其它配置选择器，按 row2_cols 占列 ──
+    # ── Row 2 (config bar): other config pickers, each taking row2_cols columns ──
     rows = [row1]
     if extra_items:
         if len(row2_cols) != len(extra_items):
@@ -313,9 +304,7 @@ def service_management_bar(
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# 统计卡片
-# ═══════════════════════════════════════════════════════════════
+# ── Stat card ──
 
 def stat_card(
     title: str, value: str, icon_name: str,
@@ -350,9 +339,7 @@ def stat_card(
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# 面板容器
-# ═══════════════════════════════════════════════════════════════
+# ── Panel container ──
 
 def section_card(title: str, content: ft.Control, icon_name: str | None = None) -> ft.Container:
     header = panel_header(title, icon_name)
@@ -370,9 +357,7 @@ def section_card(title: str, content: ft.Control, icon_name: str | None = None) 
     )
 
 
-# ═══════════════════════════════════════════════════════════════
-# 状态 Chip
-# ═══════════════════════════════════════════════════════════════
+# ── Status chip ──
 
 _STATUS_STYLES = {
     "pending":   ("#94A3B8", ft.Icons.HOURGLASS_EMPTY),

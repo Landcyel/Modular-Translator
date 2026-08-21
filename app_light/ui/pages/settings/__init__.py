@@ -1,15 +1,15 @@
-"""设置页面子包 — 配置生成器（两列工作台布局）。
+"""Settings page subpackage — config generator (two-column workbench layout).
 
-左列 (2/5)：配置类型导航（上）+ 配置文件库（下）
-右列 (3/5)：配置编辑器（分组强类型表单）
+Left column (2/5): config type navigation (top) + config file library (bottom)
+Right column (3/5): config editor (grouped strongly-typed form)
 
-声明式引擎重写后：
-- 导航分组与全部配置类型来自单一注册表 ``CONFIG_GROUPS``（config_schema）。
-- 表单渲染走 ``form_builder.build_form``：按 ``ConfigType.groups`` 渲染分组
-  标题；错误就地显示（不重建整棵树）。
-- 表单刷新统一为 ``_render_form`` 单一入口，加载/切换/新建/校验失败共用。
-- 文件库的 导入 / 导出 / 复制 按钮已接线（flet 0.86.2 async FilePicker）。
-- path 字段的浏览按钮经 ``_browse_path`` 注入（同步入口 + page.run_task）。
+After the declarative engine rewrite:
+- Nav groups and all config types come from the single registry ``CONFIG_GROUPS`` (config_schema).
+- Form rendering goes through ``form_builder.build_form``: group titles are rendered from
+  ``ConfigType.groups``; errors are shown in place (no full-tree rebuild).
+- Form refresh is unified into the single ``_render_form`` entry, shared by load/switch/new/validation-failure.
+- The file library's import / export / duplicate buttons are wired (flet 0.86.2 async FilePicker).
+- The browse button for path fields is injected via ``_browse_path`` (sync entry + page.run_task).
 """
 
 import json
@@ -24,26 +24,26 @@ from core.system_config import load_section, save_section
 
 
 def build_settings(page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
-    """兼容包装 — 创建 SettingsPage 实例并构建 UI。"""
+    """Compatibility wrapper — create a SettingsPage instance and build the UI."""
     return SettingsPage(page, facade, file_picker).build()
 
 
 class SettingsPage:
-    """配置生成器页面实例 — 长期持有状态，避免导航切换时丢失。"""
+    """Config generator page instance — holds state long-term so it survives navigation switches."""
 
     def __init__(self, page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
         self.page = page
         self.facade = facade
-        # flet 0.86.2：FilePicker 为 async 协程 API（pick_files/get_directory_path/save_file）
+        # flet 0.86.2: FilePicker is an async coroutine API (pick_files/get_directory_path/save_file)
         self.file_picker = file_picker or ft.FilePicker()
-        # 注册 FilePicker 服务（延迟到页面首次 build/refresh 时，避免在 page.add 前触发 update）
+        # Register the FilePicker service (deferred to the page's first build/refresh, avoiding an update before page.add)
         self._picker_registered = False
 
-        # ── 当前选中的配置类型 ──
+        # ── Currently selected config type ──
         self.current_ct: ConfigType = CONFIG_TYPE_LIST[0]
         self.current_nav_key: str = self.current_ct.key
 
-        # ── 表单状态 ──
+        # ── Form state ──
         self.field_refs: dict = {}
         self.current_form_values: dict | None = None
         self.config_name: str = ""
@@ -58,22 +58,20 @@ class SettingsPage:
         self.nav_column = ft.Ref[ft.Column]()
         self.editor_title = ft.Ref[ft.Text]()
         self.save_row_ref = ft.Ref[ft.Row]()
-        # 顶部操作行的强引用持有（flet 0.86.2 Ref 为弱引用，临时 Row 会被 GC 使
-        # current 变 None；改用普通属性持有挂载中的控件）
+        # Strong reference to the top action row (flet 0.86.2 Ref is weak; a temporary Row
+        # would be GC'd making current None; hold the mounted control via a normal attribute)
         self._save_row_ctrl: "ft.Row | None" = None
-        # 文件库面板强引用（切换 ini/json 托管类型时重建中间列）
+        # Strong reference to the file library panel (rebuilds the middle column when switching ini/json-managed types)
         self._file_panel_ctrl: "ft.Container | None" = None
 
-        # ── 回调注册标志（设置页当前无 facade 回调）──
+        # ── Callback registration flag (settings page currently has no facade callbacks) ──
         self._callbacks_registered = False
         self.register_callbacks()
 
-    # ════════════════════════════════════════════════════
-    #  公开接口
-    # ════════════════════════════════════════════════════
+    # ── Public interface ──
 
     def build(self) -> ft.Control:
-        """构建/重建设置页面 UI（无顶部“设置 · 配置工作台”标题栏）。"""
+        """Build/rebuild the settings page UI (no top "Settings · Config Workbench" title bar)."""
         self._ensure_file_picker_registered()
         nav_panel = self._build_nav_panel()
         form_panel = self._build_editor_panel()
@@ -81,7 +79,7 @@ class SettingsPage:
         return self._build_workspace(nav_panel, file_panel, form_panel)
 
     def save_ui_state(self) -> None:
-        """离开页面前从控件 refs 同步状态到实例属性。"""
+        """Sync state from control refs to instance attributes before leaving the page."""
         if self.config_name_ref.current:
             self.config_name = self.config_name_ref.current.value or ""
         try:
@@ -90,17 +88,18 @@ class SettingsPage:
             self.current_form_values = None
 
     def refresh(self) -> None:
-        """facade 回调或切换回页面时刷新（恢复状态栏消息）。"""
+        """Refresh on facade callbacks or when switching back to the page (restores the status-bar message)."""
         self._ensure_file_picker_registered()
         if self.status_message:
             self._set_status(self.status_message, self.status_ok)
 
     def _ensure_file_picker_registered(self) -> None:
-        """延迟注册 FilePicker 服务（幂等）。
+        """Defer the FilePicker service registration (idempotent).
 
-        flet 0.86.2 中服务注册会触发 page.update()，若在 page.add(root)
-        之前调用会把未完成/空的控件树 patch 给客户端，导致渲染异常；
-        因此延迟到页面首次 build/refresh（此时 page 已就绪）再注册。
+        In flet 0.86.2, service registration triggers page.update(); calling it before
+        page.add(root) would patch an incomplete/empty control tree to the client and cause
+        rendering issues. So registration is deferred to the page's first build/refresh
+        (when the page is ready).
         """
         if self._picker_registered:
             return
@@ -109,20 +108,18 @@ class SettingsPage:
             try:
                 self.page._services.register_service(self.file_picker)
             except Exception:
-                pass  # 重复注册/未就绪时静默
+                pass  # swallow duplicate/not-ready registration
 
     def register_callbacks(self) -> None:
-        """向 facade 注册回调（设置页当前无 facade 回调）。"""
+        """Register callbacks with the facade (the settings page currently has no facade callbacks)."""
         if self._callbacks_registered:
             return
         self._callbacks_registered = True
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 状态栏
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — status bar ──
 
     def _safe_update(self, ctrl):
-        """防御性刷新：控件未挂载 page 时静默跳过（flet 未挂载 update 抛 RuntimeError）。"""
+        """Defensive update: silently skip when the control is not mounted to a page (unmounted update raises RuntimeError)."""
         if ctrl is None:
             return
         try:
@@ -139,9 +136,7 @@ class SettingsPage:
             self.status_text.current.color = Palette.SUCCESS if ok else Palette.ERROR
             self._safe_update(self.status_text.current)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 面板构建
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — panel building ──
 
     def _build_nav_panel(self) -> ft.Container:
         nav_items = self._build_nav_items()
@@ -170,8 +165,8 @@ class SettingsPage:
         )
 
     def _build_save_row(self) -> ft.Row:
-        """顶部操作行：json 托管类型 = 配置名称 + 新建 + 保存；
-        ini 托管类型（默认配置）= 说明文本 + 保存（保存直接写 default.ini）。"""
+        """Top action row: json-managed types = config name + New + Save;
+        ini-managed types (default configs) = explanation text + Save (writes default.ini directly)."""
         save_btn = ft.FilledButton(
             content=ft.Text("保存配置", size=12, color="#FFFFFF"),
             on_click=self._save,
@@ -216,10 +211,11 @@ class SettingsPage:
            vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
     def _refresh_save_row(self) -> None:
-        """ini 托管类型切换时重建顶部操作行。
+        """Rebuild the top action row when switching ini-managed types.
 
-        注意：刷新用的临时 Row 不再绑定 Ref（flet 0.86.2 Ref 为弱引用，
-        临时控件被 GC 后 current 变 None）；直接更新强引用持有的挂载控件。
+        Note: the temporary Row used for refresh no longer binds a Ref (flet 0.86.2 Ref is weak;
+        after the temporary control is GC'd, current becomes None); update the mounted control
+        held by the strong reference directly.
         """
         if self._save_row_ctrl is not None:
             self._save_row_ctrl.controls = self._build_save_row().controls
@@ -227,10 +223,10 @@ class SettingsPage:
 
     def _build_editor_panel(self) -> ft.Container:
         save_row = self._build_save_row()
-        # 持有挂载中的控件引用（替代 Ref，避免弱引用失效）
+        # Hold a reference to the mounted control (instead of Ref, avoiding weak-ref invalidation)
         self._save_row_ctrl = save_row
 
-        # 初始化表单（首次 build 时 form_content ref 未挂载，直接构造）
+        # Initialize the form (on first build form_content ref is not mounted; construct directly)
         self.field_refs = {}
         initial_rows = build_form(
             self.current_ct, self.field_refs,
@@ -240,7 +236,7 @@ class SettingsPage:
 
         return ft.Container(
             content=ft.Column([
-                # ── 顶部固定：标题 + 保存状态 ──
+                # ── Top fixed: title + save status ──
                 ft.Row([
                     ft.Text(ref=self.editor_title,
                             value=self._build_editor_title(),
@@ -250,10 +246,10 @@ class SettingsPage:
                     ft.Text(ref=self.status_text, size=Typography.BODY_SM,
                             color=Palette.SUCCESS),
                 ], spacing=10),
-                # ── 顶部固定：配置名称 + 保存操作 ──
+                # ── Top fixed: config name + save actions ──
                 save_row,
                 divider(),
-                # ── 中间滚动：分组表单 ──
+                # ── Middle scrollable: grouped form ──
                 ft.Column(ref=self.form_content,
                           controls=initial_rows,
                           spacing=14,
@@ -270,7 +266,7 @@ class SettingsPage:
         )
 
     def _build_ini_card(self) -> ft.Container:
-        """INI 托管类型（默认配置）的配置文件库提示卡片。"""
+        """Info card for the file library of ini-managed types (default configs)."""
         return ft.Container(
             content=ft.Column([
                 ft.Row([
@@ -292,7 +288,7 @@ class SettingsPage:
         )
 
     def _build_file_panel_inner(self) -> ft.Column:
-        """文件库中间列：ini 托管类型显示提示卡片；json 类型显示文件列表 + 操作行。"""
+        """File library middle column: ini-managed types show an info card; json types show the file list + action row."""
         if self.current_ct.ini_section:
             return ft.Column([
                 panel_header("配置文件库"),
@@ -339,15 +335,15 @@ class SettingsPage:
             shadow=_shadow("low"),
             expand=2,
         )
-        # 持有挂载中的控件（Ref 弱引用会失效），供 _refresh_file_panel 重建中间列
+        # Hold the mounted control (Ref weak refs go stale), for _refresh_file_panel to rebuild the middle column
         self._file_panel_ctrl = container
         return container
 
     def _refresh_file_panel(self) -> None:
-        """切换 ini/json 托管类型时重建文件库中间列（ini 卡片 ↔ 文件列表）。
+        """Rebuild the file library middle column when switching ini/json-managed types (ini card ↔ file list).
 
-        重建后 file_list_col ref 重新绑定到新的列表 Column（ini 分支无
-        file_list_col → current 为 None，_refresh_file_list 安全 return）。
+        After the rebuild, the file_list_col ref rebinds to the new list Column (the ini branch
+        has no file_list_col → current is None, so _refresh_file_list safely returns).
         """
         if self._file_panel_ctrl is None:
             return
@@ -355,7 +351,7 @@ class SettingsPage:
         self._safe_update(self._file_panel_ctrl)
 
     def _build_workspace(self, nav_panel, file_panel, form_panel) -> ft.Control:
-        """左列（导航 + 文件库）+ 右列（编辑器）；窄屏时纵向堆叠。"""
+        """Left column (nav + file library) + right column (editor); stacked vertically on narrow screens."""
         left_col = ft.Column([
             nav_panel,
             ft.Container(height=Layout.COLUMN_SPACING),
@@ -380,18 +376,16 @@ class SettingsPage:
         form_panel.expand = 3
         return workspace
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 表单统一刷新
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — unified form refresh ──
 
     def _typed_to_form_values(self, typed: dict) -> dict:
-        """类型化中间值 dict → 控件值 dict（校验失败后恢复表单用）。"""
+        """Typed intermediate dict → control-value dict (used to restore the form after validation failure)."""
         return {f.key: f.to_control_value(typed.get(f.key, f.default))
                 for f in self.current_ct.fields}
 
     def _render_form(self, form_values: dict | None = None,
                      errors: dict | None = None) -> None:
-        """重建表单区域并恢复状态 — 加载/切换/新建/校验失败共用单一入口。"""
+        """Rebuild the form area and restore state — single entry shared by load/switch/new/validation-failure."""
         self.field_refs = {}
         rows = build_form(self.current_ct, self.field_refs,
                           values=form_values, errors=errors,
@@ -405,7 +399,7 @@ class SettingsPage:
             self._safe_update(self.editor_title.current)
 
     def _on_form_select_change(self, e):
-        """select 变化联动：mode 字段 → 更新当前表单值并重渲染（visible_when 显隐）。"""
+        """select change linkage: the mode field → updates current form values and re-renders (visible_when show/hide)."""
         key = getattr(e.control, "data", None)
         if key != "mode":
             return
@@ -415,7 +409,7 @@ class SettingsPage:
         self._render_form(form_values=values)
 
     def _browse_path(self, field, ref) -> None:
-        """path 字段浏览按钮 — 同步入口，内部调度异步 FilePicker（flet 0.86.2）。"""
+        """Browse button for path fields — sync entry; dispatches the async FilePicker internally (flet 0.86.2)."""
         if self.file_picker is None or self.page is None:
             return
 
@@ -425,7 +419,7 @@ class SettingsPage:
                     path = await self.file_picker.get_directory_path(
                         dialog_title=f"选择 {field.label}")
                 else:
-                    # flet 0.86.2：pick_files 直接返回 list[FilePickerFile]
+                    # flet 0.86.2: pick_files returns list[FilePickerFile] directly
                     files = await self.file_picker.pick_files(
                         dialog_title=f"选择 {field.label}",
                         file_type=ft.FilePickerFileType.ANY)
@@ -438,9 +432,7 @@ class SettingsPage:
 
         self.page.run_task(_do)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 导航栏
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — navigation rail ──
 
     def _build_editor_title(self) -> str:
         if self.config_name:
@@ -450,7 +442,7 @@ class SettingsPage:
     def _build_nav_items(self) -> list:
         items = []
         for group_name, type_items in CONFIG_GROUPS:
-            # 大条目（分组标题）：等大空心圆点 + 字号加大一号 + 颜色变浅
+            # Group header item: larger hollow dot + font size bumped up one step + lighter color
             items.append(
                 ft.Container(
                     content=ft.Row([
@@ -493,7 +485,7 @@ class SettingsPage:
         self.current_ct = target
         self.current_nav_key = self.current_ct.key
         self.config_name = ""
-        # ini 托管类型（默认配置）直接加载 ini 对应 section 填充表单
+        # ini-managed type (default config): load the corresponding ini section to fill the form
         if target.ini_section:
             self.current_form_values = target.to_form_values(
                 load_section(target.ini_section))
@@ -517,9 +509,7 @@ class SettingsPage:
             self._safe_update(self.config_name_ref.current)
         self._set_status("")
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 文件列表
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — file list ──
 
     def _list_config_files(self, ct: ConfigType) -> list[Path]:
         save_dir = ct.save_path
@@ -566,9 +556,7 @@ class SettingsPage:
         self.file_list_col.current.controls = self._build_file_rows()
         self._safe_update(self.file_list_col.current)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 配置加载/导入/导出/复制/删除
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — config load/import/export/duplicate/delete ──
 
     def _load_config(self, filename: str):
         fp = self.current_ct.save_path / filename
@@ -591,13 +579,13 @@ class SettingsPage:
         self._set_status(f"✓ 已加载 {filename}", ok=True)
 
     def _import_config(self, e):
-        """导入外部 JSON 到当前类型表单（不落盘，需用户保存）。"""
+        """Import an external JSON into the current type's form (not written to disk; user must save)."""
         if self.file_picker is None or self.page is None:
             return
 
         async def _do():
             try:
-                # flet 0.86.2：pick_files 直接返回 list[FilePickerFile]
+                # flet 0.86.2: pick_files returns list[FilePickerFile] directly
                 files = await self.file_picker.pick_files(
                     dialog_title="导入配置文件",
                     file_type=ft.FilePickerFileType.ANY,
@@ -621,7 +609,7 @@ class SettingsPage:
         self.page.run_task(_do)
 
     def _export_config(self, e):
-        """把当前表单构建结果导出为 JSON 文件。"""
+        """Export the current form build result to a JSON file."""
         if self.file_picker is None or self.page is None:
             return
         name = ((self.config_name_ref.current.value or "").strip()
@@ -652,7 +640,7 @@ class SettingsPage:
         self.page.run_task(_do)
 
     def _duplicate_config(self, e):
-        """复制当前表单值为新配置：名称框置为 {原名}_copy，不落盘。"""
+        """Duplicate the current form values as a new config: name box set to {original}_copy, not written to disk."""
         name = ((self.config_name_ref.current.value or "").strip()
                 if self.config_name_ref.current else "")
         new_name = f"{name}_copy" if name else f"{self.current_ct.key}_copy"
@@ -691,9 +679,7 @@ class SettingsPage:
         )
         self.page.show_dialog(dlg)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 保存
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — save ──
 
     def _confirm_overwrite(self, fp: Path, json_str: str):
         def _close_dlg():
@@ -752,7 +738,7 @@ class SettingsPage:
 
             result = ct.build_output(intermediate)
 
-            # ini 托管类型（默认配置）：直接写 configs/system/default.ini 对应 section
+            # ini-managed type (default config): write directly to the configs/system/default.ini section
             if ct.ini_section:
                 save_section(ct.ini_section, result)
                 self._set_status(

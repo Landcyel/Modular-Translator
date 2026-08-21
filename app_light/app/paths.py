@@ -1,13 +1,15 @@
-"""应用根路径定位 — 统一「源码根 / PyInstaller 产物根」基准。
+"""App root path resolution — the unified baseline for "source root / PyInstaller output root".
 
-各模块（service / system_config / config_picker /
-config_schema 等）此前用 ``Path(__file__)`` 推导项目根；PyInstaller 打包后
-``__file__`` 指向 ``_internal/`` 内编译产物，推导值错位到 ``_internal/``，
-而 ``dependencies/`` 与 ``configs/`` 都在产物根（``_internal/`` 同级）。
+Modules (service / system_config / config_picker / config_schema, etc.) previously
+derived the project root via ``Path(__file__)``; after PyInstaller packaging,
+``__file__`` points at the compiled artifact inside ``_internal/``, so the derived
+value was misaligned to ``_internal/`` while ``dependencies/`` and ``configs/``
+live at the output root (siblings of ``_internal/``).
 
-本模块提供唯一基准：PyInstaller 冻结运行时取 ``sys.executable`` 所在目录
-（onedir 产物根），开发运行时取 ``__file__`` 推导的项目根。所有依赖
-``dependencies/`` / ``configs/`` 相对路径的模块都应改用 ``project_root``。
+This module provides the single baseline: under a PyInstaller frozen runtime it
+takes ``sys.executable``'s directory (the onedir output root); in dev runs it
+uses the project root derived from ``__file__``. Every module relying on
+``dependencies/`` / ``configs/`` relative paths should use ``project_root``.
 """
 
 import os
@@ -16,27 +18,28 @@ from pathlib import Path
 
 __all__ = ["app_root", "project_root", "is_frozen"]
 
-# 本文件位于 <根>/app/ 包内，dirname 是 app/，向上取一级得到项目根。
+# This file lives in the <root>/app/ package; dirname is app/, so one level up is the project root.
 _DEV_ROOT = Path(__file__).resolve().parent.parent
 
 
 def is_frozen() -> bool:
-    """是否运行于打包产物（PyInstaller onedir）。"""
+    """Whether running from a packaged build (PyInstaller onedir)."""
     return getattr(sys, "frozen", False)
 
 
 def app_root() -> Path:
-    """返回应用根目录（Path）。
+    """Return the application root directory (Path).
 
-    - 打包冻结运行时（PyInstaller onedir）：``sys.executable``
-      所在目录，即产物根（与 ``_internal/`` 同级，含 ``dependencies/``、``configs/``）。
-    - 开发/源码运行：项目根。
+    - Frozen packaged runtime (PyInstaller onedir): the directory of
+      ``sys.executable``, i.e. the output root (sibling of ``_internal/``,
+      containing ``dependencies/`` and ``configs/``).
+    - Dev/source run: the project root.
     """
     if is_frozen():
-        # sys.executable 在 onedir 下即 <产物根>/ModularTranslator.exe
+        # Under onedir, sys.executable is <output root>/ModularTranslator.exe
         return Path(sys.executable).resolve().parent
     return _DEV_ROOT
 
 
-# 模块级常量：各模块直接 ``from app.paths import project_root`` 复用。
+# Module-level constant: modules reuse it directly via ``from app.paths import project_root``.
 project_root: Path = app_root()

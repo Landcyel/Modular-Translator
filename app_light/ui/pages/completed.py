@@ -1,8 +1,8 @@
-"""已完成任务页面 — 查看、预览、导出、清除已完成任务。
+"""Completed tasks page — view, preview, export, and clear completed tasks.
 
-布局：
-1. 顶栏：标题 + 自动导出/手动导出/导出目录选择/清空按钮
-2. 下方：已完成任务卡片列表
+Layout:
+1. Top bar: title + auto-export / manual export / export-dir picker / clear buttons
+2. Below: list of completed task cards
 """
 
 import flet as ft
@@ -16,14 +16,14 @@ import time
 from pathlib import Path
 
 try:
-    import winsound  # Windows 内嵌播放（无外部窗口）
-except ImportError:  # 非 Windows 平台
+    import winsound  # Windows embedded playback (no external window)
+except ImportError:  # non-Windows platforms
     winsound = None
 
 try:
     from pydub import AudioSegment
     from pydub.utils import mediainfo_json
-except Exception:  # pydub 缺失时退回纯 FFmpeg 解码路径
+except Exception:  # fall back to a pure-FFmpeg decode path when pydub is missing
     AudioSegment = None
     mediainfo_json = None
 
@@ -39,24 +39,24 @@ from core.writer import format_lrc_time
 
 
 def build_completed(page: ft.Page, facade=None):
-    """兼容包装 — 创建 CompletedPage 实例并构建 UI。"""
+    """Compatibility wrapper — create a CompletedPage instance and build the UI."""
     return CompletedPage(page, facade).build()
 
 
 class CompletedPage:
-    """已完成任务页面实例 — 长期持有状态，避免导航切换时丢失。"""
+    """Completed tasks page instance — holds state long-term so it survives navigation switches."""
 
     def __init__(self, page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
         self.page = page
         self.facade = facade
         self.file_picker = file_picker
 
-        # ── 状态 ──
+        # ── State ──
         self.export_dir: Path = Path("output")
         self.auto_export_enabled = False
         self.completed_tasks: list = []
 
-        # ── 内嵌音频试听状态（pydub 处理 + FFmpeg 解码 → winsound / ffplay 播放）──
+        # ── Embedded audio preview state (pydub processing + FFmpeg decode → winsound / ffplay playback) ──
         self._audio_playing = False
         self._audio_temp_wav: Path | None = None
         self._audio_proc: subprocess.Popen | None = None
@@ -69,10 +69,10 @@ class CompletedPage:
         self._audio_progress_thread: threading.Thread | None = None
         self._audio_dragging = False
         self._audio_ui_refs: dict = {}
-        # pydub：把底层 ffmpeg/ffprobe/ffplay 指向项目自带 FFmpeg
+        # pydub: point the underlying ffmpeg/ffprobe/ffplay at the project-bundled FFmpeg
         self._pydub_ready = configure_pydub()
 
-        # 打开软件时读取"输出默认配置"（configs/output/default.json），覆盖默认值
+        # Read the "output default config" at app startup (configs/output/default.json) to override defaults
         self._load_default_config()
 
         # ── Refs ──
@@ -81,17 +81,18 @@ class CompletedPage:
         self.auto_export_switch = ft.Ref[ft.Switch]()
         self.task_count_label = ft.Ref[ft.Text]()
 
-        # ── 回调注册标志 ──
+        # ── Callback registration flag ──
         self._callbacks_registered = False
 
-        # 注册 facade 回调（仅首次）
+        # Register facade callbacks (first time only)
         self.register_callbacks()
 
     def _load_default_config(self) -> None:
-        """打开软件时读取"输出默认配置"（configs/system/default.ini [output]）。
+        """Read the "output default config" at app startup (configs/system/default.ini [output]).
 
-        设置页"输出默认配置"管理的字段为：输出目录 output_dir、是否自动导出
-        auto_export。文件缺失或解析失败时保持默认（output/、False）。
+        The fields managed by the Settings "output default config" are: output directory
+        output_dir and auto-export auto_export. If the file is missing or fails to parse,
+        keep the defaults (output/, False).
         """
         try:
             data = load_section("output")
@@ -100,19 +101,17 @@ class CompletedPage:
         out = data.get("output_dir")
         if isinstance(out, str) and out.strip():
             self.export_dir = Path(out)
-        # ini 中 auto_export 为字符串（"true"/"false"），需显式转换
+        # auto_export in ini is a string ("true"/"false"); convert explicitly
         auto = data.get("auto_export")
         if isinstance(auto, str):
             self.auto_export_enabled = auto.strip().lower() in ("true", "1", "yes")
 
-    # ════════════════════════════════════════════════════
-    #  公开接口
-    # ════════════════════════════════════════════════════
+    # ── Public interface ──
 
     def build(self) -> ft.Control:
-        """构建/重建已完成任务页面 UI。"""
+        """Build/rebuild the completed tasks page UI."""
 
-        # ── 单行工具条操作（自动导出 + 全部导出 + 导出目录 + 任务数量 + 清空）──
+        # ── Single-row toolbar actions (auto-export + export all + export dir + task count + clear) ──
         top_actions = [
             ft.Row([
                 ft.Text("自动导出", size=12, color=Palette.SUBTEXT),
@@ -159,7 +158,7 @@ class CompletedPage:
             shadow=_shadow("low"),
         )
 
-        # ── 任务列表 ──
+        # ── Task list ──
         task_list_col = ft.Column(
             ref=self.list_container,
             controls=[
@@ -200,26 +199,24 @@ class CompletedPage:
         ], spacing=0, expand=True, scroll=ft.ScrollMode.AUTO)
 
     def save_ui_state(self) -> None:
-        """离开页面前从控件 refs 同步状态到实例属性。"""
-        self._stop_audio()  # 切页时停止内嵌试听，避免后台继续播放
+        """Sync state from control refs to instance attributes before leaving the page."""
+        self._stop_audio()  # stop embedded preview when switching pages to avoid background playback
         if self.auto_export_switch.current:
             self.auto_export_enabled = self.auto_export_switch.current.value
 
     def refresh(self) -> None:
-        """facade 回调或切换回页面时刷新任务列表。"""
+        """Refresh the task list on facade callbacks or when switching back to the page."""
         self.completed_tasks = self._load_completed_tasks()
         self._rebuild_list()
 
     def register_callbacks(self) -> None:
-        """向 facade 注册回调（仅首次调用生效）。"""
+        """Register callbacks with the facade (effective only on first call)."""
         if self._callbacks_registered or self.facade is None:
             return
         self.facade._on_task_change(self._on_task_change)
         self._callbacks_registered = True
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 数据加载
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — data loading ──
 
     def _load_completed_tasks(self) -> list:
         if self.facade is None:
@@ -227,7 +224,7 @@ class CompletedPage:
         return self.facade.list_completed_tasks(task_type=None)
 
     def _build_task_card(self, task) -> ft.Container:
-        """单个已完成任务卡片 — 文件名 + 完成时间 + 预览/导出/清除按钮。"""
+        """Single completed task card — file name + completion time + preview/export/clear buttons."""
         if isinstance(task, dict):
             tid = task.get("id", "")
             ttype = task.get("service_type", "") or task.get("type", "")
@@ -254,7 +251,7 @@ class CompletedPage:
             "moss": Palette.INFO, "gsv": Palette.PRIMARY_DARK,
         }.get(ttype, Palette.SUBTEXT)
 
-        # ── 提交时间（created_at 为 Unix 时间戳；core 无 completed_at，用提交时间展示）──
+        # ── Submit time (created_at is a Unix timestamp; core has no completed_at, so show submit time) ──
         time_str = ""
         created = task.get("created_at", 0) if isinstance(task, dict) else getattr(task, "created_at", 0)
         if created:
@@ -341,16 +338,14 @@ class CompletedPage:
         if self.list_container.current.page:
             self.list_container.current.update()
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 操作
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — actions ──
 
     @staticmethod
     def _task_kind(task) -> str:
-        """按任务类型归类导出子目录：translation / transcription / tts / ''（根目录）。
+        """Categorize the export subdirectory by task type: translation / transcription / tts / '' (root).
 
-        type 为服务名：翻译（llama/api/openai/translate）、转写（moss/
-        transcription）、语音合成（gsv/tts）。
+        type is the service name: translate (llama/api/openai/translate), transcribe (moss/
+        transcription), TTS (gsv/tts).
         """
         if isinstance(task, dict):
             ttype = str(task.get("service_type", "") or task.get("type", "") or "").lower()
@@ -366,23 +361,23 @@ class CompletedPage:
 
     @staticmethod
     def _task_file_name(task) -> str:
-        """取任务原始文件名（dict / snapshot 兼容），回退 input_summary/空。"""
+        """Get the task's original file name (dict / snapshot compatible), falling back to input_summary / empty."""
         if isinstance(task, dict):
             return task.get("file_name", "") or task.get("input_summary", "") or ""
         return (getattr(task, "file_name", "") or getattr(task, "input_summary", "") or "")
 
-    # ── 预览 ──────────────────────────────────────────────
+    # ── Preview ──
 
     @staticmethod
     def _task_result(task):
-        """取任务结果（dict / snapshot 兼容）。"""
+        """Get the task result (dict / snapshot compatible)."""
         if isinstance(task, dict):
             return task.get("result")
         return getattr(task, "result", None)
 
     @classmethod
     def _task_audio_path(cls, task) -> Path | None:
-        """TTS/GSV 结果 → 音频文件路径；非音频结果返回 None。"""
+        """TTS/GSV result → audio file path; non-audio results return None."""
         result = cls._task_result(task)
         if isinstance(result, dict):
             path = result.get("audio_path")
@@ -392,7 +387,7 @@ class CompletedPage:
 
     @classmethod
     def _task_title(cls, task) -> str:
-        """预览面板标题：文件名/摘要 + 短 id。"""
+        """Preview panel title: file name / summary + short id."""
         name = cls._task_file_name(task)
         tid = str(task.get("id", "") if isinstance(task, dict) else getattr(task, "id", ""))
         if name:
@@ -401,11 +396,11 @@ class CompletedPage:
 
     @classmethod
     def _task_preview_text(cls, task) -> str:
-        """把任务结果整理为可预览的纯文本。
+        """Flatten a task result into previewable plain text.
 
-        - 翻译结果 str → 原样返回
-        - 转写结果 dict → 标准 LRC 时间轴/说话人文本（与转写页预览一致）
-        - 其它 dict/对象 → 可读 JSON 文本
+        - Translation result str → returned as-is
+        - Transcription result dict → standard LRC timeline / speaker text (matches the transcribe page preview)
+        - Other dict/object → readable JSON text
         """
         result = cls._task_result(task)
         if isinstance(result, str):
@@ -434,7 +429,7 @@ class CompletedPage:
             return str(result)
 
     def _preview(self, task):
-        """点击卡片「预览」：文本结果 → 文本面板；TTS 结果 → 音频试听面板。"""
+        """Card "Preview" click: text result → text panel; TTS result → audio preview panel."""
         result = self._task_result(task)
         if result is None:
             self._show_snack("该任务暂无结果可预览", error=True)
@@ -446,7 +441,7 @@ class CompletedPage:
             self._show_text_preview(task)
 
     def _show_text_preview(self, task):
-        """弹出文本预览面板（只读多行文本框 + 关闭按钮）。"""
+        """Show a text preview dialog (read-only multiline text field + close button)."""
         text = self._task_preview_text(task)
         title = self._task_title(task)
         tid = str(task.get("id", "") if isinstance(task, dict) else getattr(task, "id", ""))
@@ -503,13 +498,13 @@ class CompletedPage:
         )
         self.page.show_dialog(dlg)
 
-    # ── 音频预览（pydub + FFmpeg 内嵌播放，可拖动进度）────────────────
+    # ── Audio preview (pydub + FFmpeg embedded playback, draggable progress) ──
 
-    _PYDUB_LOAD_MAX_BYTES = 64 * 1024 * 1024  # 超过该体积改用 ffmpeg 直接切片解码，避免 pydub 全量载入内存
+    _PYDUB_LOAD_MAX_BYTES = 64 * 1024 * 1024  # above this size, slice/decode directly with ffmpeg instead of loading the whole file into memory
 
     @staticmethod
     def _fmt_ms(ms: float) -> str:
-        """毫秒 → mm:ss.d（例如 01:23.4）。"""
+        """Milliseconds → mm:ss.d (e.g. 01:23.4)."""
         try:
             ms = max(0.0, float(ms))
         except (TypeError, ValueError):
@@ -520,16 +515,16 @@ class CompletedPage:
         return f"{minutes:02d}:{seconds:04.1f}"
 
     def _show_audio_preview(self, task, audio_path: Path, result: dict):
-        """弹出音频预览面板：文件信息 + 可拖动进度条 + 内嵌播放/暂停。
+        """Show an audio preview dialog: file info + draggable progress bar + embedded play/pause.
 
-        - 时长/采样率优先用 pydub（mediainfo_json → 项目自带 ffprobe）读取，
-          result 里已有字段作为兜底。
-        - 播放时用 pydub 对音频切片并导出 WAV（大文件自动回退 ffmpeg 直接
-          切片解码），Windows 走 winsound、其它平台走 ffplay -nodisp。
+        - Duration/sample rate are read with pydub (mediainfo_json → project-bundled ffprobe),
+          with fields already present in result as a fallback.
+        - For playback, pydub slices the audio and exports a WAV (large files automatically fall
+          back to direct ffmpeg slice/decode); Windows uses winsound, other platforms use ffplay -nodisp.
         """
         title = self._task_title(task)
         path = Path(audio_path)
-        self._stop_audio()  # 打开新预览前先停掉可能还在播的音频
+        self._stop_audio()  # stop any audio still playing before opening a new preview
         exists = path.is_file()
         info = result.get("info") if isinstance(result, dict) else None
         info = info if isinstance(info, dict) else {}
@@ -543,7 +538,7 @@ class CompletedPage:
             except OSError:
                 pass
 
-        # pydub 读取音频信息（ffprobe），失败则退回 result 中的字段
+        # Read audio info with pydub (ffprobe); fall back to fields in result on failure
         duration_ms = 0.0
         sample_rate = result.get("sample_rate")
         if exists and self._pydub_ready and mediainfo_json is not None:
@@ -592,7 +587,7 @@ class CompletedPage:
         if info.get("fragments") is not None:
             rows.append(info_row("片段数", str(info.get("fragments"))))
 
-        # 播放器控件引用（每次打开重建，关闭时清空）
+        # Player control refs (rebuilt on each open, cleared on close)
         slider_ref = ft.Ref[ft.Slider]()
         cur_ref = ft.Ref[ft.Text]()
         total_ref = ft.Ref[ft.Text]()
@@ -685,7 +680,7 @@ class CompletedPage:
         self.page.show_dialog(dlg)
 
     def _toggle_play(self, audio_path: Path):
-        """播放/暂停按钮。"""
+        """Play/pause toggle button."""
         if self._audio_playing:
             self._pause_audio()
             return
@@ -696,7 +691,7 @@ class CompletedPage:
             self._set_play_button(True)
 
     def _pause_audio(self):
-        """暂停：停止底层播放，但把当前进度保留在滑块上。"""
+        """Pause: stop the underlying playback but keep the current position on the slider."""
         pos = self._current_playback_pos_ms()
         self._stop_audio()
         self._audio_position_ms = min(pos, self._audio_duration_ms) if self._audio_duration_ms > 0 else pos
@@ -704,11 +699,11 @@ class CompletedPage:
         self._set_play_button(False)
 
     def _start_audio_playback(self, audio_path: Path, start_ms: float = 0.0) -> bool:
-        """从 start_ms 开始内嵌播放。
+        """Start embedded playback from start_ms.
 
-        - Windows：先生成临时 WAV（pydub 切片导出；大文件回退 ffmpeg 直接
-          切片解码），再用 winsound 异步播放。
-        - 其它平台：项目自带 ffplay -nodisp -ss start 直接播放。
+        - Windows: first generate a temp WAV (pydub slice export; large files fall back to direct
+          ffmpeg slice/decode), then play asynchronously with winsound.
+        - Other platforms: play directly with the project-bundled ffplay -nodisp -ss start.
         """
         path = Path(audio_path)
         if not path.is_file():
@@ -771,10 +766,11 @@ class CompletedPage:
         return True
 
     def _build_playable_wav(self, path: Path, start_ms: float, out: Path) -> bool:
-        """生成用于 winsound 播放的临时 WAV（PCM16 / 44.1kHz / 立体声）。
+        """Generate a temp WAV for winsound playback (PCM16 / 44.1kHz / stereo).
 
-        小文件用 pydub：AudioSegment.from_file(start_second=...) 切片并重采样后导出；
-        大文件（pydub 需整段读入内存）回退为项目自带 ffmpeg 直接切片解码。
+        Small files use pydub: AudioSegment.from_file(start_second=...) slices and resamples before
+        exporting; large files (pydub would load the whole segment into memory) fall back to the
+        project-bundled ffmpeg for direct slice/decode.
         """
         try:
             file_bytes = path.stat().st_size
@@ -806,7 +802,7 @@ class CompletedPage:
         return True
 
     def _probe_duration_ms(self, path: Path) -> float:
-        """用 pydub（ffprobe）快速读取时长（毫秒）；失败返回 0。"""
+        """Quickly read duration in ms with pydub (ffprobe); returns 0 on failure."""
         if self._pydub_ready and mediainfo_json is not None:
             try:
                 media = mediainfo_json(str(path))
@@ -815,7 +811,7 @@ class CompletedPage:
                 return 0.0
         return 0.0
 
-    # ── 播放进度（后台线程刷新，可拖动跳转）──────────────
+    # ── Playback progress (refreshed by a background thread; draggable seek) ──
 
     def _start_progress_thread(self):
         self._audio_stop_event.clear()
@@ -840,7 +836,7 @@ class CompletedPage:
                 return
 
     def _current_playback_pos_ms(self) -> float:
-        """当前播放位置（毫秒）：播放中按墙钟推算，否则返回滑块记录值。"""
+        """Current playback position (ms): computed from the wall clock while playing, otherwise the slider-recorded value."""
         if not self._audio_playing:
             return self._audio_position_ms
         elapsed_ms = (time.monotonic() - self._audio_started_at) * 1000.0
@@ -902,7 +898,7 @@ class CompletedPage:
         self._seek_audio(pos, audio_path)
 
     def _seek_audio(self, pos_ms: float, audio_path: Path):
-        """跳转到指定位置；若正在播放则从该位置重新开始。"""
+        """Seek to the given position; if playing, restart playback from that position."""
         try:
             pos_ms = max(0.0, float(pos_ms))
         except (TypeError, ValueError):
@@ -936,7 +932,7 @@ class CompletedPage:
             pass
 
     def _stop_audio(self):
-        """停止当前内嵌播放并清理临时 WAV / ffplay 进程与进度线程。"""
+        """Stop the current embedded playback and clean up temp WAV / ffplay process and progress thread."""
         self._audio_stop_event.set()
         if (self._audio_progress_thread is not None
                 and self._audio_progress_thread.is_alive()
@@ -963,7 +959,7 @@ class CompletedPage:
             self._audio_temp_wav = None
 
     def _set_play_button(self, playing: bool):
-        """刷新试听按钮为「停止 / 试听」双态。"""
+        """Refresh the preview button between its "Stop / Preview" two states."""
         refs = self._audio_ui_refs
         if not refs:
             return
@@ -981,7 +977,7 @@ class CompletedPage:
             pass
 
     def _open_dir(self, audio_path: Path):
-        """打开音频所在目录（便于查看/复制文件）。"""
+        """Open the folder containing the audio (for viewing/copying files)."""
         folder = Path(audio_path).parent
         try:
             if sys.platform.startswith("win"):
@@ -995,7 +991,7 @@ class CompletedPage:
             self._show_snack(f"打开目录失败: {ex}", error=True)
 
     def _show_snack(self, msg: str, error: bool = False):
-        """主线程安全地弹出 SnackBar 提示。"""
+        """Show a SnackBar safely from the main thread."""
         if self.page is not None:
             self.page.show_dialog(
                 ft.SnackBar(ft.Text(msg), bgcolor=Palette.ERROR if error else Palette.SUCCESS)
@@ -1014,11 +1010,11 @@ class CompletedPage:
             pass
 
     def _export_one(self, task) -> bool:
-        """单个任务导出（手动/自动共用）：统一路径 + 成功/失败日志。返回是否成功。
+        """Export a single task (shared by manual/auto): unified path + success/failure logs. Returns success.
 
-        - 转写任务（transcription）→ LRC 歌词文件（b.mp3 → b.lrc）
-        - 语音合成任务（tts）→ 复制结果 wav（{name}.wav / {id}.wav）
-        - 翻译/未知类型 → 保留源后缀
+        - Transcription task → LRC lyric file (b.mp3 → b.lrc)
+        - TTS task → copy the result wav ({name}.wav / {id}.wav)
+        - Translate/unknown type → keep the source extension
         """
         if self.facade is None:
             return False
@@ -1027,10 +1023,10 @@ class CompletedPage:
         kind = self._task_kind(task)
         base = self.export_dir / kind if kind else self.export_dir
         if kind == "transcription":
-            # 转写结果 → 打好轴的 LRC 歌词文件（b.mp3 → b.lrc；无文件名 → {tid}.lrc）
+            # transcription result → timed LRC lyric file (b.mp3 → b.lrc; no name → {tid}.lrc)
             out = base / (f"{Path(name).stem}.lrc" if name else f"{tid}.lrc")
         elif kind == "tts":
-            # 语音合成 → 音频文件（b.txt → b.wav；无文件名 → {tid}.wav）
+            # TTS → audio file (b.txt → b.wav; no name → {tid}.wav)
             out = base / (f"{Path(name).stem}.wav" if name else f"{tid}.wav")
         else:
             out = base / (name or f"{tid}.txt")
@@ -1043,7 +1039,7 @@ class CompletedPage:
             return False
 
     def _export_single(self, task_id: str):
-        """按任务原始文件名导出（后缀判断交由 export_task 三档规则）；找不到任务回退 {id}.txt。"""
+        """Export by the task's original file name (extension logic delegated to export_task's three-rule scheme); falls back to {id}.txt when the task is not found."""
         if self.facade is None:
             return
         for t in self._load_completed_tasks():
@@ -1051,7 +1047,7 @@ class CompletedPage:
             if tid == task_id:
                 self._export_one(t)
                 return
-        # 找不到任务：回退 {id}.txt（根目录）
+        # Task not found: fall back to {id}.txt (root dir)
         out = self.export_dir / f"{task_id}.txt"
         try:
             self.facade.export_task(task_id, out)
@@ -1070,7 +1066,7 @@ class CompletedPage:
             self._rebuild_list()
 
     async def _choose_export_dir(self, e):
-        """选择导出目录（flet 0.86.2：get_directory_path 直接返回路径字符串）。"""
+        """Choose the export directory (flet 0.86.2: get_directory_path returns a path string directly)."""
         if self.file_picker is None:
             log.record("warn", "[已完成] 未接文件选择器，无法选择导出目录")
             return
@@ -1094,26 +1090,24 @@ class CompletedPage:
         self.auto_export_enabled = self.auto_export_switch.current.value if self.auto_export_switch.current else False
 
     def _manual_export_all(self, e):
-        """全部导出：逐个任务经 _export_one（统一路径与日志）。"""
+        """Export all: each task goes through _export_one (unified path and logs)."""
         if self.facade is None:
             return
         for task in self._load_completed_tasks():
             self._export_one(task)
         log.record("info", "[已完成] 全部导出完成")
 
-    # ════════════════════════════════════════════════════
-    #  Facade 回调
-    # ════════════════════════════════════════════════════
+    # ── Facade callbacks ──
 
     def _on_task_change(self, snapshot):
-        # TaskSnapshot 无 service_type 字段（type 为服务名：llama/api/transcribe…）
-        # 用 _task_kind 归类判断（translation/transcription 之外忽略）
+        # TaskSnapshot has no service_type field (type is the service name: llama/api/transcribe...)
+        # Use _task_kind to categorize (ignore anything other than translation/transcription)
         if not self._task_kind(snapshot):
             return
         status = getattr(snapshot, "status", "")
         if status in ("completed", "failed", "cancelled"):
             self.completed_tasks = self._load_completed_tasks()
             self._rebuild_list()
-            # 自动导出：与手动导出共用 _export_one（统一路径 + 成功/失败日志）
+            # Auto-export: shares _export_one with manual export (unified path + success/failure logs)
             if self.auto_export_enabled and status == "completed":
                 self._export_one(snapshot)

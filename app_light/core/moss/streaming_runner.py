@@ -1,17 +1,18 @@
-"""MOSS 流式转写 Runner —— 不改 vendor 源码的部分文本预览方案。
+"""MOSS streaming transcription Runner — partial-text preview without modifying vendor source.
 
-vendor 的 ``ModelRunner.transcribe`` 内部使用只数 token 的
-``ProgressStreamer``，运行中拿不到部分文本。本模块通过**子类覆盖**
-提供能力：
+The vendor's ``ModelRunner.transcribe`` internally uses a token-counting
+``ProgressStreamer``, so partial text is unavailable mid-run. This module provides
+the capability via **subclass override**:
 
-- 复用父类 ``_lock`` / ``_ensure_loaded`` / ``_device`` / ``_dtype``；
-- 复用 vendor 公开函数 ``build_transcription_messages`` / ``prepare_inputs``
-  与 ``generation_progress`` / ``TranscriptionResult``；
-- 唯一差异：streamer 换成 ``PartialTextStreamer``，在计数 token 的同时
-  节流解码部分文本并回调。
+- Reuses the parent's ``_lock`` / ``_ensure_loaded`` / ``_device`` / ``_dtype``;
+- Reuses the vendor public functions ``build_transcription_messages`` / ``prepare_inputs``
+  and ``generation_progress`` / ``TranscriptionResult``;
+- The only difference: the streamer is swapped for ``PartialTextStreamer``, which
+  throttled-decodes partial text and calls back while counting tokens.
 
-生成调用序列与 vendor ``generate_transcription`` 完全一致（autocast、
-inference_mode、TypeError 去 streamer 重试兜底），vendor 源码零修改。
+The generation call sequence is identical to the vendor ``generate_transcription``
+(autocast, inference_mode, TypeError-retry fallback that drops the streamer), with
+zero vendor source changes.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ from moss_transcribe_diarize.inference_utils import (
     prepare_inputs,
 )
 
-# 与 vendor inference_utils._token_count 保持一致（不依赖私有符号）
+# Mirrors vendor inference_utils._token_count (without depending on the private symbol)
 def _token_count(value) -> int:
     if hasattr(value, "numel"):
         return int(value.numel())
@@ -43,12 +44,12 @@ def _token_count(value) -> int:
 
 
 class PartialTextStreamer(BaseStreamer):
-    """token 计数 + 部分文本节流解码的 HF streamer。
+    """HF streamer doing token counting + throttled partial-text decoding.
 
-    与 vendor ``ProgressStreamer`` 的语义对齐：第一次 ``put`` 视为
-    prompt prefill 直接跳过，之后累积生成 token ids。部分文本只在
-    ``min_tokens`` 或 ``min_interval`` 阈值触发时解码回调，避免逐
-    token 解码与 UI 逐 token 重建。
+    Aligned with the vendor ``ProgressStreamer`` semantics: the first ``put`` is
+    treated as prompt prefill and skipped; afterwards generated token ids accumulate.
+    Partial text is decoded and reported only when the ``min_tokens`` or
+    ``min_interval`` threshold triggers, avoiding per-token decoding and per-token UI rebuilds.
     """
 
     def __init__(
@@ -71,7 +72,7 @@ class PartialTextStreamer(BaseStreamer):
         self.generated_tokens = 0
         self._seen_prompt = False
         self._ids: list[torch.Tensor] = []
-        # 待同步的 GPU token（批量 .cpu()，避免每 token 一次 GPU→CPU 同步）
+        # GPU tokens pending sync (batched .cpu(), avoiding one GPU→CPU sync per token)
         self._pending_ids: list[torch.Tensor] = []
         self._pending_count = 0
         self._last_emit_tokens = 0
@@ -80,7 +81,7 @@ class PartialTextStreamer(BaseStreamer):
     def put(self, value):
         count = _token_count(value)
         if not self._seen_prompt:
-            # 与 vendor ProgressStreamer 一致：第一次 put 为 prompt prefill
+            # Same as vendor ProgressStreamer: the first put is the prompt prefill
             self._seen_prompt = True
             return
         self.generated_tokens += count
@@ -98,9 +99,10 @@ class PartialTextStreamer(BaseStreamer):
         return None
 
     def _collect_ids(self, value):
-        """累积 GPU token，攒满 sync_batch 才批量 .cpu()（降 8 倍同步频率）。
+        """Accumulate GPU tokens, batching .cpu() once sync_batch is reached (8× fewer syncs).
 
-        仅当值累计达到阈值或显式 flush 时才触发同步，避免打断 GPU 异步流水线。
+        Sync only triggers when the accumulated count reaches the threshold or an explicit
+        flush, avoiding interruptions to the GPU async pipeline.
         """
         if isinstance(value, torch.Tensor) and value.numel():
             self._pending_ids.append(value.detach().reshape(-1))
@@ -114,7 +116,7 @@ class PartialTextStreamer(BaseStreamer):
             self._flush_pending()
 
     def _flush_pending(self):
-        """把累积的 GPU token 批量取回 CPU 并追加到已解码 id 列表。"""
+        """Batch-move accumulated GPU tokens back to CPU and append to the decoded id list."""
         if not self._pending_ids:
             return
         self._ids.append(torch.cat(self._pending_ids).cpu())
@@ -134,7 +136,7 @@ class PartialTextStreamer(BaseStreamer):
         return False
 
     def _decode(self) -> str:
-        self._flush_pending()  # 生成结束前把剩余 < sync_batch 的 token 也取回
+        self._flush_pending()  # before decode ends, also pull back remaining < sync_batch tokens
         if not self._ids:
             return ""
         try:
@@ -147,10 +149,11 @@ class PartialTextStreamer(BaseStreamer):
 
 
 class StreamingModelRunner(ModelRunner):
-    """支持 ``partial_text_callback`` 的 ModelRunner 子类。
+    """ModelRunner subclass supporting ``partial_text_callback``.
 
-    ``SUPPORTS_PARTIAL_TEXT = True`` 供执行器探测能力；老版本 vendor 或
-    自定义 streamer 不可用时，调用方应直接使用 vendor ``ModelRunner``。
+    ``SUPPORTS_PARTIAL_TEXT = True`` lets the executor detect the capability; when the
+    older vendor or the custom streamer is unavailable, callers should use the vendor
+    ``ModelRunner`` directly.
     """
 
     SUPPORTS_PARTIAL_TEXT = True
@@ -234,16 +237,17 @@ class StreamingModelRunner(ModelRunner):
         prompt: str = DEFAULT_PROMPT,
         max_length: int = 131072,
     ) -> tuple[dict, int]:
-        """窗口/单文件转写的输入准备：波形解码 + mel 特征 + tokenize（无模型锁）。
+        """Input preparation for window/single-file transcription: waveform decode + mel features + tokenize (no model lock).
 
-        可在后台线程与其它窗口的 ``generate_with`` 并行执行（流水线），
-        把 ffmpeg 切片/解码/特征提取等开销与 GPU 推理重叠。懒加载且设备
-        未确定时回退到持锁加载（仅首窗串行，流水线从第二窗开始生效）。
+        Can run in a background thread in parallel with other windows' ``generate_with``
+        (pipeline), overlapping ffmpeg cutting/decode/feature-extraction overhead with GPU
+        inference. When lazy-loaded and the device is not yet resolved, falls back to
+        lock-held loading (only the first window is serial; the pipeline takes effect from the second).
         """
         if getattr(self, "_device", None) is None:
             with self._lock:
                 self._ensure_loaded()
-        # 与 vendor generate_transcription 相同的 autocast 策略
+        # Same autocast strategy as vendor generate_transcription
         context = (
             torch.amp.autocast("cuda", dtype=self._dtype)
             if self._device.type == "cuda"
@@ -273,9 +277,9 @@ class StreamingModelRunner(ModelRunner):
         status_callback: Optional[Callable] = None,
         partial_text_callback: Optional[Callable[[str, int], None]] = None,
     ) -> TranscriptionResult:
-        """纯 generate（持模型锁），与 ``prepare_clip`` 配对使用。
+        """Pure generate (holds the model lock), paired with ``prepare_clip``.
 
-        长音频流水线：窗口 i 的 generate 与窗口 i+1 的 prepare 并行。
+        Long-audio pipeline: window i's generate runs in parallel with window i+1's prepare.
         """
         with self._lock:
             if status_callback is not None:
@@ -288,8 +292,8 @@ class StreamingModelRunner(ModelRunner):
                 if partial_text_callback is not None:
                     partial_text_callback(partial_text, generated_tokens)
 
-            # 进度只由部分文本（已确认段）驱动：不注册 token 级回调，
-            # 避免 token 级无段发射把进度打回 0% 造成闪烁。
+            # Progress is driven only by partial text (confirmed segments): no token-level
+            # callback registered, avoiding token-level no-segment emissions pushing progress back to 0% (flicker).
             streamer = PartialTextStreamer(
                 self._processor.tokenizer,
                 partial_text_callback=on_partial_text,
@@ -327,7 +331,7 @@ class StreamingModelRunner(ModelRunner):
                 try:
                     outputs = self._model.generate(**generate_kwargs)
                 except TypeError as exc:
-                    # 与 vendor 相同：部分模型 generate 不接受 streamer
+                    # Same as vendor: some models' generate does not accept a streamer
                     if "streamer" not in str(exc):
                         raise
                     generate_kwargs.pop("streamer", None)
@@ -337,8 +341,9 @@ class StreamingModelRunner(ModelRunner):
             text = self._processor.tokenizer.decode(
                 generated_ids, skip_special_tokens=True
             ).strip()
-            # 收尾回调：确保预览包含最终文本（部分模型 streamer 不触发末次 put）。
-            # 进度满格由执行器 execute() 收尾统一补发，此处不再发状态回调。
+            # Final callback: ensure the preview includes the final text (some models' streamer
+            # never triggers the last put). Full progress is emitted uniformly by the executor's
+            # execute() wrap-up, so no status callback is sent here.
             if partial_text_callback is not None:
                 partial_text_callback(text, int(generated_ids.numel()))
 

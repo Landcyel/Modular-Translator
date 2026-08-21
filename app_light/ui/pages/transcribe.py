@@ -1,9 +1,9 @@
-"""语音转写页面 — 对接 AppFacade 实现 MOSS 转写服务与任务管理。
+"""Transcription page — integrates AppFacade for the MOSS transcription service and task management.
 
-布局（三行）：
-1. 服务管理栏（后端固定：MOSS）
-2. 配置栏（服务配置 + 转写参数）
-3. 工作区（左预览 + 右任务队列）
+Layout (three rows):
+1. Service management bar (backend fixed: MOSS)
+2. Config bar (service config + transcription args)
+3. Workspace (left preview + right task queue)
 """
 
 import asyncio
@@ -24,44 +24,44 @@ from ui.widgets.task_list import task_queue_panel
 from core.writer import format_lrc_time
 
 
-# MOSS（ModelRunner）可解码扩展名白名单：收窄白名单，避免容器格式直接入队后 FAILED
+# Decodable extension whitelist for MOSS (ModelRunner): narrowed so container formats don't enqueue and then FAIL
 _MOSS_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".opus"}
 
 
 def build_transcribe(page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
-    """兼容包装 — 创建 TranscribePage 实例并构建 UI。"""
+    """Compatibility wrapper — create a TranscribePage instance and build the UI."""
     return TranscribePage(page, facade, file_picker).build()
 
 
 class TranscribePage:
-    """语音转写工作台页面实例 — 长期持有状态，避免导航切换时丢失。"""
+    """Transcription workbench page instance — holds state long-term so it survives navigation switches."""
 
     def __init__(self, page: ft.Page, facade=None, file_picker: ft.FilePicker = None):
         self.page = page
         self.facade = facade
         self.file_picker = file_picker
 
-        # ── 服务状态 ──
+        # ── Service state ──
         self.is_online = False
         self.is_loading = False
-        self.is_paused = True  # 任务队列初始暂停：仅服务加载后才能开启
-        # 本分支（main）转写仅使用 MOSS：服务 key 即任务 type
+        self.is_paused = True  # task queue starts paused: only enabled once the service is loaded
+        # This branch (main) transcribes with MOSS only: the service key is the task type
         self.current_backend = "moss"
-        self.service_device = None  # 实际工作设备（cuda/cpu），状态栏着色显示
+        self.service_device = None  # actual working device (cuda/cpu), colored in the status bar
 
-        # ── 配置选择缓存（MOSS 专用：服务配置 / 转写参数 / 热词）──
+        # ── Config picker cache (MOSS-specific: service config / transcription args / hotwords) ──
         self.selected_moss_server = None
         self.selected_moss_args = None
         self.selected_hotword = None
 
-        # 打开软件时读取"转写默认配置"（configs/system/default.ini [transcribe]）
+        # Read the "transcription default config" at app startup (configs/system/default.ini [transcribe])
         self._default_cfg: dict = {}
         self._load_default_config()
 
-        # ── 预览状态 ──
+        # ── Preview state ──
         self.preview_value = ""
 
-        # ── 队列状态缓存 ──
+        # ── Queue state cache ──
         self.current_task = None
         self.waiting_tasks = []
 
@@ -73,25 +73,26 @@ class TranscribePage:
         self.preview_text = ft.Ref[ft.TextField]()
         self.task_container = ft.Ref[ft.Container]()
 
-        # ── 配置选择器 getter（build 时赋值）──
-        self._get_moss_model = None      # 服务配置（configs/models/moss*.json）
-        self._get_transcribe = None      # 转写参数（moss_args）
+        # ── Config picker getters (assigned at build) ──
+        self._get_moss_model = None      # service config (configs/models/moss*.json)
+        self._get_transcribe = None      # transcription args (moss_args)
         self._get_hotword = None
 
-        # ── 服务栏容器 ──
+        # ── Service bar container ──
         self._service_bar_ctrl = None
 
-        # ── UI sink 接线（注册名固定 'moss'）──
+        # ── UI sink wiring (registration name fixed as 'moss') ──
         self._sink = None
         if self.facade is not None and hasattr(self.facade, "register_ui_sink"):
             self._sink = PageUiSink(page, self)
             self.facade.register_ui_sink(self.current_backend, self._sink)
 
     def _load_default_config(self) -> None:
-        """打开软件时读取"转写默认配置"（configs/system/default.ini [transcribe]）。
+        """Read the "transcription default config" at app startup (configs/system/default.ini [transcribe]).
 
-        初始化 MOSS 服务配置/转写参数/热词各下拉的默认选中项；
-        文件缺失或解析失败时保持 None（下拉回退首项）。
+        Initializes the default selections of the MOSS service config / transcription args /
+        hotwords dropdowns; keeps None when the file is missing or fails to parse (dropdowns
+        fall back to the first option).
         """
         try:
             data = load_section("transcribe")
@@ -102,17 +103,15 @@ class TranscribePage:
         self.selected_moss_args = data.get("moss_args") or None
         self.selected_hotword = data.get("hotwords") or None
 
-    # ════════════════════════════════════════════════════
-    #  公开接口
-    # ════════════════════════════════════════════════════
+    # ── Public interface ──
 
     def build(self) -> ft.Control:
-        """构建/重建转写页面 UI。"""
+        """Build/rebuild the transcription page UI."""
 
-        # ── 服务管理栏（MOSS 专用）──
+        # ── Service management bar (MOSS-specific) ──
         self._service_bar_ctrl = ft.Container(content=self._build_service_bar())
 
-        # ── 结果预览 ──
+        # ── Result preview ──
         preview_field = ft.TextField(
             ref=self.preview_text,
             hint_text="转写结果将在此处预览...",
@@ -131,7 +130,7 @@ class TranscribePage:
         preview_section = ft.Container(
             content=ft.Column([
                 panel_header("结果预览",
-                    # 选择音频文件按钮位于结果预览一行最右侧（原导出 LRC 位置）
+                    # the pick-audio-file button sits at the far right of the result preview row (former export-LRC position)
                     trailing=bordered_button(
                         "选择音频文件", ft.Icons.FOLDER_OPEN,
                         on_click=self._pick_file,
@@ -146,7 +145,7 @@ class TranscribePage:
             expand=3,
         )
 
-        # ── 任务队列 ──
+        # ── Task queue ──
         task_panel = ft.Container(
             ref=self.task_container,
             content=task_queue_panel(
@@ -162,13 +161,15 @@ class TranscribePage:
             expand=2,
         )
 
-        # ── 工作区（宽屏双栏；窄屏纵向排列，保留页面滚动）──
-        # 宽屏 workspace 不再固定高度：expand 填满内容区剩余高度，
-        # 保证结果预览/任务队列面板底边与内容区底边对齐、完整显示。
+        # ── Workspace (two columns on wide screens; stacked vertically on narrow screens) ──
+        # Wide-screen workspace no longer has a fixed height: expand fills the content
+        # area's remaining height so the preview/task-queue panel bottoms align with the
+        # content-area bottom and display fully.
         is_narrow = self.page.width > 0 and self.page.width < Layout.DESKTOP_MIN_WIDTH
         workspace = (
-            # 窄屏同样不滚动：scroll 容器内 flex 子项高度塌缩(不显示)，
-            # 面板内部(预览/任务区)已有滚动，外层用有界 flex 分配
+            # Narrow screens likewise do not scroll: flex children collapse to 0 height
+            # inside a scroll container (not shown); panels already scroll internally,
+            # so the outer layer uses bounded flex allocation
             ft.Column([
                 preview_section,
                 ft.Container(height=Layout.COLUMN_SPACING),
@@ -182,8 +183,9 @@ class TranscribePage:
             ], expand=True, vertical_alignment=ft.CrossAxisAlignment.STRETCH)
         )
 
-        # 根列不滚动：flet 0.86.2 的 scroll 容器(Flutter ListView)主轴无界，
-        # 内部 expand 子项高度塌缩为 0 导致组件不显示；窗口已固定，无需整页滚动。
+        # The root column does not scroll: in flet 0.86.2 a scroll container (Flutter
+        # ListView) has an unbounded main axis, so inner expand children collapse to 0
+        # height and are not shown; the window is fixed, so no full-page scrolling is needed.
         return ft.Column([
             self._service_bar_ctrl,
             ft.Container(height=Layout.SECTION_GAP),
@@ -192,22 +194,22 @@ class TranscribePage:
            horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def _build_service_bar(self) -> ft.Control:
-        """构建 MOSS 专用服务管理栏（无后端切换，配置目录固定 moss/moss_args）。"""
+        """Build the MOSS-specific service management bar (no backend switch; config dirs fixed to moss/moss_args)."""
         moss_model_picker, self._get_moss_model = config_picker(
             "服务配置", [],
             config_type="moss",
             glob_filter="*.json",
-            width=Layout.PICKER_WIDTH_SM,   # 与翻译页服务配置同宽
+            width=Layout.PICKER_WIDTH_SM,   # same width as the translate page service config
             value=self.selected_moss_server,
         )
-        # ── 转写参数（moss_args）──
+        # ── Transcription args (moss_args) ──
         transcribe_picker, self._get_transcribe = config_picker(
             "转写参数", [],
             config_type="moss_args",
             width=200,
             value=self.selected_moss_args,
         )
-        # ── 热词（configs/transcribe/hotwords/*.json；MOSS 官方方案：附加到 prompt）──
+        # ── Hotwords (configs/transcribe/hotwords/*.json; MOSS official approach: appended to the prompt) ──
         hotwords_picker, self._get_hotword = config_picker(
             "热词", ["无"],
             config_type="hotwords",
@@ -221,25 +223,25 @@ class TranscribePage:
             status_label_ref=self.status_label,
             start_btn_ref=self.start_btn,
             stop_btn_ref=self.stop_btn,
-            backend_selector=None,          # 本分支固定 MOSS，不提供后端切换
-            config_dropdown=None,           # 服务配置移入启停按钮组（紧邻启动按钮左侧）
+            backend_selector=None,          # this branch is fixed to MOSS; no backend switch
+            config_dropdown=None,           # service config moved into the start/stop group (just left of the start button)
             extra_items=[transcribe_picker, hotwords_picker],
             pre_start_actions=[moss_model_picker],
             on_start=self._load_model,
             on_stop=self._unload_model,
             merge_backend=False,
-            row1_cols=(4, 8),               # 状态 / 启停组（含服务配置，组内右对齐）
-            row2_cols=(6, 6),               # 转写参数 / 热词
+            row1_cols=(4, 8),               # status / start-stop group (incl. service config, right-aligned in group)
+            row2_cols=(6, 6),               # transcription args / hotwords
         )
 
     def _re_register_sink(self):
-        """sink 注册到当前服务 key（main 分支固定 'moss'）。"""
+        """Re-register the sink to the current service key (fixed as 'moss' on the main branch)."""
         if self._sink is not None and self.facade is not None \
                 and hasattr(self.facade, "register_ui_sink"):
             self.facade.register_ui_sink(self.current_backend, self._sink)
 
     def save_ui_state(self) -> None:
-        """离开页面前从控件 refs 同步状态到实例属性（MOSS 专用缓存）。"""
+        """Sync state from control refs to instance attributes before leaving the page (MOSS-specific cache)."""
         if self.preview_text.current:
             self.preview_value = self.preview_text.current.value or ""
         if self._get_moss_model:
@@ -250,7 +252,7 @@ class TranscribePage:
             self.selected_hotword = self._get_hotword()
 
     def refresh(self) -> None:
-        """facade 回调或切换回页面时刷新。"""
+        """Refresh on facade callbacks or when switching back to the page."""
         if self.facade:
             s = self.facade.get_service_status(self.current_backend)
             self.is_online = s.get("status") == "online"
@@ -259,10 +261,10 @@ class TranscribePage:
         self._refresh_tasks()
 
     def update_service_status(self, online: bool, loading: bool = False, device: str | None = None):
-        """后端推送：更新服务状态（重赋值 + 刷新状态点/标签/启停按钮）。
+        """Backend push: update the service status (reassign + refresh status dot/label/start-stop buttons).
 
-        队列开启联动（仅服务状态变化时）：停止/加载中 → 暂停；加载成功 → 开启；
-        同状态推送（如 refresh）不覆盖用户手动暂停。
+        Queue-enable linkage (only when the service status changes): stopped/loading → paused;
+        loaded successfully → enabled; same-status pushes (e.g. refresh) do not override a user's manual pause.
         """
         was_online = self.is_online
         self.is_online = bool(online)
@@ -278,20 +280,21 @@ class TranscribePage:
             self._refresh_tasks()
 
     def update_tasks(self, current, waiting):
-        """后端推送：重赋值任务缓存并重建队列面板（dict 投影，对齐翻译页）。
+        """Backend push: reassign the task cache and rebuild the queue panel (dict projection, matching the translate page).
 
-        当前任务 running 且 payload 携带转写段 → 实时预览（随转写推进滚动刷新）。
+        When the current task is running and the payload carries transcription segments →
+        live preview (scrolled/refreshed as transcription progresses).
         """
         self.current_task = current
         self.waiting_tasks = waiting or []
-        # MOSS 懒加载：首次任务完成后 _device 才从 auto 解析为 cuda:0/cpu，
-        # 任务推送是刷新状态栏设备的最佳时机。
+        # MOSS lazy loading: _device only resolves from auto to cuda:0/cpu after the first
+        # task completes; task pushes are the best time to refresh the status-bar device.
         self.service_device = self._current_device()
         self._update_service_status()
         self._render_panel(self._build_callbacks(self.waiting_tasks))
-        # 实时预览：转写进行中，用已确认转写段更新预览区（segments 必须是 list）。
-        # MOSS（StreamingModelRunner）推送 payload.segments，
-        # 完成后仍经 update_finished_tasks 全量刷新最终结果。
+        # Live preview: while transcribing, update the preview area with confirmed segments
+        # (segments must be a list). MOSS (StreamingModelRunner) pushes payload.segments;
+        # the final result is still fully refreshed via update_finished_tasks when done.
         if isinstance(current, dict) and current.get("status") == "running":
             payload = current.get("payload")
             segs = payload.get("segments", []) if isinstance(payload, dict) else []
@@ -299,21 +302,19 @@ class TranscribePage:
                 self._render_segments_preview(segs)
 
     def update_finished_tasks(self, tasks):
-        """后端推送：最新完成结果更新预览（转写页特色）。"""
+        """Backend push: update the preview with the latest completed results (transcribe-page feature)."""
         if tasks:
             self._update_preview()
 
     def register_callbacks(self) -> None:
-        """旧回调收集路径已废弃——改为 UI sink 推送（__init__ 注册）。"""
+        """The old callback-collection path is deprecated — replaced by UI sink pushes (registered in __init__)."""
         pass
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 服务状态与任务
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — service state and tasks ──
 
     @staticmethod
     def _safe_update(ctrl):
-        """控件未挂载（flet 0.86.2 首帧/重建时序）时静默跳过 update。"""
+        """Silently skip update when the control is not mounted (flet 0.86.2 first-frame/rebuild timing)."""
         if ctrl is None:
             return
         try:
@@ -344,7 +345,7 @@ class TranscribePage:
 
     @staticmethod
     def _device_display(device: str | None) -> tuple[str | None, str | None]:
-        """返回 (显示文本, 颜色)；CUDA 绿 / CPU 橙，未知返回 None。"""
+        """Return (display text, color); CUDA green / CPU orange; unknown returns None."""
         if not device:
             return None, None
         dv = str(device).lower()
@@ -375,7 +376,7 @@ class TranscribePage:
         return None
 
     def _on_clear(self):
-        """清空等待任务（保留当前运行任务；已完成任务由已完成页面管理）。"""
+        """Clear waiting tasks (keep the currently running task; completed tasks are managed by the completed page)."""
         if self.facade is not None:
             try:
                 self.facade.clear_queue(self.current_backend)
@@ -389,7 +390,7 @@ class TranscribePage:
             )
 
     def _on_pause_toggle(self):
-        """暂停/恢复队列：仅服务加载后可开启；暂停始终允许（服务未加载时本就暂停）。"""
+        """Pause/resume the queue: enable only after the service loads; pausing is always allowed (it is already paused when the service is not loaded)."""
         if self.is_paused and not self.is_online:
             msg = "需先加载服务才能开启队列"
             log.record("warn", f"[转写] {msg}")
@@ -408,14 +409,14 @@ class TranscribePage:
         self._refresh_tasks()
 
     def _build_callbacks(self, waiting):
-        """构造队列面板 callbacks（_refresh_tasks 与 update_tasks 共用）。"""
+        """Build the queue panel callbacks (shared by _refresh_tasks and update_tasks)."""
         def _on_cancel(tid):
             if self.facade:
                 try:
                     self.facade.cancel_task(tid)
                 except Exception as ex:
                     log.record("error", f"[转写] 取消失败: {ex}")
-            # 本地缓存同步（current 与 waiting 均可能）
+            # sync local caches (both current and waiting are possible)
             if self.current_task and self.current_task.get("id") == tid:
                 self.current_task = None
             self.waiting_tasks = [t for t in self.waiting_tasks if t.get("id") != tid]
@@ -430,7 +431,7 @@ class TranscribePage:
         def _on_move_down(tid):
             for i, t in enumerate(waiting):
                 if t.get("id") == tid:
-                    # 边界：最后一项不可下移（避免 index 超出队列长度-1）
+                    # boundary: the last item cannot move down (avoid index exceeding queue length-1)
                     if i < len(waiting) - 1:
                         self.facade.reorder_task(tid, i + 1)
                     break
@@ -458,7 +459,7 @@ class TranscribePage:
         self._render_panel(self._build_callbacks(self.waiting_tasks))
 
     def _render_panel(self, callbacks=None):
-        """重建队列面板（独立方法，供推送/拉取/本地缓存操作共用）。"""
+        """Rebuild the queue panel (standalone method shared by push/pull/local-cache operations)."""
         if self.task_container.current is None:
             return
         if callbacks is None:
@@ -474,7 +475,7 @@ class TranscribePage:
 
     @staticmethod
     def _snap_to_dict(snap) -> dict:
-        """将 TaskSnapshot 投影为 dict（与 AppFacade._project 字段一致，供本地缓存操作）。"""
+        """Project a TaskSnapshot to a dict (fields match AppFacade._project; used for local-cache operations)."""
         name = snap.file_name or ""
         return {
             "id": snap.id,
@@ -489,7 +490,7 @@ class TranscribePage:
         }
 
     def _render_segments_preview(self, segments: list):
-        """把转写段（dict 或 Segment 兼容）渲染为标准 LRC：``[mm:ss.xx]<说话人>正文``。"""
+        """Render transcription segments (dict or Segment compatible) as standard LRC: ``[mm:ss.xx]<speaker>text``."""
         if self.preview_text.current is None:
             return
         lines = []
@@ -504,10 +505,11 @@ class TranscribePage:
         self._safe_update(self.preview_text.current)
 
     def _update_preview(self):
-        """用最新已完成任务结果全量更新预览区（不截断段数）。
+        """Fully update the preview area with the latest completed task result (no segment truncation).
 
-        有任务正在转写时不覆盖实时预览（防止上一次完整结果与当前
-        实时内容交替闪烁；任务完成瞬间 current 变空自然切到新结果）。
+        Do not overwrite the live preview while a task is transcribing (prevents the previous full
+        result and the current live content from flickering alternately; the moment the task
+        finishes, current empties and naturally switches to the new result).
         """
         if self.current_task and self.current_task.get("status") == "running":
             return
@@ -520,27 +522,27 @@ class TranscribePage:
                 if segments:
                     self._render_segments_preview(segments)
                     return
-        # 无结果时显示默认提示
+        # show a default hint when there is no result
         if self.preview_text.current:
             self.preview_value = "暂无转写结果"
             self.preview_text.current.value = self.preview_value
             self._safe_update(self.preview_text.current)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 服务操作
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — service operations ──
 
     async def _load_model(self, e):
         if self.facade is None:
             return
         try:
-            # 先置"加载中"：状态栏显示加载中文案，并隐藏启动按钮防重复点击。
+            # First set "loading": the status bar shows the loading message and the start
+            # button is hidden to prevent repeated clicks.
             self.update_service_status(False, True)
-            # core 加载为同步阻塞（模型装载）→ 线程池避免阻塞事件循环；
-            # config_path 用服务配置选择器（configs/models/moss*.json）
+            # core loading is synchronous/blocking (model load) → thread pool avoids
+            # blocking the event loop; config_path comes from the service config picker
+            # (configs/models/moss*.json)
             config_path = self._get_moss_model() if self._get_moss_model else None
             await asyncio.to_thread(self.facade.start_service, self.current_backend, None, config_path)
-            # 主动刷新状态（推送兜底：即使后端未回调也即时更新）
+            # proactively refresh the status (push fallback: update immediately even if the backend doesn't callback)
             self.service_device = self._current_device()
             self.update_service_status(True, False, self.service_device)
         except Exception as ex:
@@ -556,22 +558,20 @@ class TranscribePage:
         if self.facade is None:
             return
         try:
-            # 先置"卸载中"：停止按钮禁用（防重复点击），状态栏更新
+            # First set "unloading": disable the stop button (prevent repeated clicks) and update the status bar
             self.update_service_status(False, True)
             await asyncio.to_thread(self.facade.stop_service, self.current_backend)
-            # 主动刷新状态（推送兜底）
+            # proactively refresh the status (push fallback)
             self.service_device = None
             self.update_service_status(False, False)
         except Exception as ex:
             log.record("error", f"[转写] 停止失败: {ex}")
             self.update_service_status(False, False)
 
-    # ════════════════════════════════════════════════════
-    #  内部方法 — 文件选择与提交
-    # ════════════════════════════════════════════════════
+    # ── Internal methods — file selection and submission ──
 
     async def _pick_file(self, e):
-        """选择导入方式 — AlertDialog 分流：选择文件（可多选、音频校验）/ 选择文件夹。"""
+        """Choose the import method — AlertDialog branches: pick files (multi-select, audio validated) / pick a folder."""
         if self.file_picker is None or self.page is None:
             return
         dlg = ft.AlertDialog(
@@ -624,7 +624,7 @@ class TranscribePage:
         if self.file_picker is None:
             return
         try:
-            # flet 0.86.2：文件夹选择 API 为 get_directory_path（直接返回路径字符串）
+            # flet 0.86.2: the folder-picking API is get_directory_path (returns a path string directly)
             result = await self.file_picker.get_directory_path(dialog_title="选择待导入文件夹")
         except Exception as ex:
             log.record("error", f"[转写] 选择文件夹失败: {ex}")
@@ -641,7 +641,7 @@ class TranscribePage:
         await self._process_selected(paths)
 
     def _import_directory(self, path: Path) -> list:
-        """扫描文件夹顶层：仅 is_file、不递归子目录、按文件名排序。"""
+        """Scan the folder's top level: only is_file, no recursion into subdirectories, sorted by file name."""
         try:
             entries = [p for p in path.iterdir() if p.is_file()]
         except OSError as ex:
@@ -650,13 +650,13 @@ class TranscribePage:
         return sorted(entries, key=lambda p: p.name.lower())
 
     async def _process_selected(self, paths: list):
-        """选择即提交：单文件/多文件/文件夹统一校验后直接入队。"""
+        """Select-and-submit: single/multiple files and folders are validated uniformly and enqueued directly."""
         self._enqueue_transcriptions(paths)
 
     def _enqueue_transcriptions(self, paths: list):
-        """批量校验并入队：后缀白名单校验、非音频拒绝且不中断。
+        """Validate in batch and enqueue: suffix whitelist check; non-audio files are rejected without interrupting the rest.
 
-        MOSS 使用可解码白名单（ModelRunner 可解码集合）。
+        MOSS uses the decodable whitelist (ModelRunner's decodable set).
         """
         allowed = _MOSS_EXTENSIONS
         ok_paths, rejected = [], []
@@ -685,18 +685,18 @@ class TranscribePage:
         self._enqueue_requests(reqs)
 
     def build_transcription_requests(self, paths: list) -> list:
-        """打包转写请求：TranscriptionRequest(task_type=当前后端, file_path, configs)。
+        """Package transcription requests: TranscriptionRequest(task_type=current backend, file_path, configs).
 
-        paths=[...] → 每个文件一个请求（单文件/批量统一）。
-        configs 键：
-        - args：转写参数模板（configs/transcribe/args/*.json）
-        - hotwords：热词文件（MOSS 在 executor 内按官方配方附加到 prompt）
+        paths=[...] → one request per file (single-file/batch unified).
+        configs keys:
+        - args: transcription args template (configs/transcribe/args/*.json)
+        - hotwords: hotwords file (MOSS appends to the prompt inside the executor per the official recipe)
         """
         configs = {}
         if self._get_transcribe:
             configs["args"] = self._get_transcribe()
         if self._get_hotword:
-            hotwords_path = self._get_hotword()  # 选「无」→ None → 不设置
+            hotwords_path = self._get_hotword()  # "None" selection → None → not set
             if hotwords_path:
                 configs["hotwords"] = hotwords_path
         return [TranscriptionRequest(
@@ -707,9 +707,9 @@ class TranscribePage:
         ) for p in paths]
 
     def _enqueue_requests(self, reqs: list) -> int:
-        """统一入队：逐个提交 + 本地缓存 + 面板刷新 + 提示；返回成功提交数。
+        """Unified enqueue: submit one by one + local cache + panel refresh + snackbar; returns the number successfully submitted.
 
-        后端 update_tasks 推送接线后由推送接管展示。
+        Once the backend's update_tasks push is wired, the push takes over display.
         """
         submitted = 0
         if self.facade is not None:
@@ -720,7 +720,7 @@ class TranscribePage:
                 except Exception as ex:
                     log.record("error", f"[转写] 提交失败: {ex}")
         else:
-            submitted = len(reqs)  # facade 未接线：仅本地缓存展示
+            submitted = len(reqs)  # facade not wired: local-cache display only
         for r in reqs:
             path = getattr(r, "file_path", None)
             name = getattr(r, "file_name", "") or (Path(path).name if path else "")
@@ -732,8 +732,8 @@ class TranscribePage:
                 "file_name": name,
                 "input_summary": name,
             })
-        # 渲染当前缓存（不重拉——拉取可能覆盖刚 append 的本地缓存；
-        # 真实后端会经 sink 推送 update_tasks 补充真实 id/状态）
+        # Render the current cache (no re-fetch — a fetch could overwrite the just-appended
+        # local cache; the real backend pushes update_tasks via the sink with real id/status)
         self._render_panel(self._build_callbacks(self.waiting_tasks))
         if self.page:
             self.page.show_dialog(

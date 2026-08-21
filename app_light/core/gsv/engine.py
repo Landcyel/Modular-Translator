@@ -1,22 +1,23 @@
-"""GsvEngine —— GPT-SoVITS 推理引擎（复刻 inference_webui_fast.py GUI 推理流程）。
+"""GsvEngine — GPT-SoVITS inference engine (replicates the inference_webui_fast.py GUI inference flow).
 
-复刻对照（源项目 inference_webui_fast.py）:
-- 模型加载 : TTS_Config({"custom": {...}}) → TTS(...)  （:125-144 同款构造）
-- 合成     : inputs 字典与 GUI inference() 逐键一致（:175-196），
-             `for item in tts_pipeline.run(inputs): yield item`（:197-199）
-- 停止     : tts_pipeline.stop()（:463 同款 stop_flag 语义）
-- 热切换   : init_vits_weights / init_t2s_weights（change_sovits_weights / change_gpt_weights 同款）
-- 参考音频 : set_ref_audio 内部 3~10s 硬校验 + prompt_cache（TTS.py:750-832）
+Replication reference (source project inference_webui_fast.py):
+- Model loading: TTS_Config({"custom": {...}}) → TTS(...)  (same construction as :125-144)
+- Synthesis: the inputs dict matches the GUI inference() key for key (:175-196),
+              `for item in tts_pipeline.run(inputs): yield item` (:197-199)
+- Stop: tts_pipeline.stop() (:463, same stop_flag semantics)
+- Hot-swap: init_vits_weights / init_t2s_weights (same as change_sovits_weights / change_gpt_weights)
+- Reference audio: set_ref_audio internal 3~10s hard validation + prompt_cache (TTS.py:750-832)
 
-运行契约（vendored 代码依赖，引擎内自动满足）:
-- import 与每次调用期间 CWD = vendor 根（TTS.py:12 的 sys.path.append、chinese2.py
-  模块级 G2PWPinyin 的 "GPT_SoVITS/text/G2PWModel"、sv.py 的 ckpt 路径均 CWD 相对）
-- sys.path 前插 vendor 根与 vendor/GPT_SoVITS（裸名 import: AR/module/text/sv/tools）
-- os.environ["bert_path"] 指向 models/ 的 roberta（chinese2.py:35 model_source）
-- sv.sv_path 在构造 TTS 前打补丁为绝对路径（sv.py:6 硬编码的相对路径）
+Runtime contract (vendored-code dependencies, satisfied automatically inside the engine):
+- CWD = vendor root during import and every call (sys.path.append in TTS.py:12, the
+  module-level G2PWPinyin in chinese2.py "GPT_SoVITS/text/G2PWModel", and the ckpt path
+  in sv.py are all CWD-relative)
+- sys.path prepends vendor root and vendor/GPT_SoVITS (bare-name imports: AR/module/text/sv/tools)
+- os.environ["bert_path"] points to the roberta in models/ (chinese2.py:35 model_source)
+- sv.sv_path is patched to an absolute path before constructing TTS (hard-coded relative path in sv.py:6)
 
-线程安全: 单实例由 RLock 串行化（TTS.run 改写 infer_panel 属性，不可并发）；
-每次公开调用 save/restore CWD，不泄漏进程工作目录。
+Thread safety: a single instance is serialized by RLock (TTS.run mutates infer_panel attributes, so
+it is not concurrency-safe); every public call saves/restores CWD, never leaking the process working directory.
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from .vendor_links import VENDOR_ROOT, ensure_vendor, ensure_links, PACKAGE_DIR
 
 
 def _numpy_compat_shim() -> None:
-    """numpy 2.x 兼容垫片: 补回 GSV 代码可能引用的已删别名（不动 vendor 源码）。"""
+    """numpy 2.x compatibility shim: restore removed aliases that GSV code may reference (without touching vendor source)."""
     np = __import__("numpy")
     aliases = {
         "int": int, "float": float, "bool": bool, "str": str, "complex": complex,
@@ -45,7 +46,7 @@ def _numpy_compat_shim() -> None:
         "NaN": float("nan"), "Inf": float("inf"),
     }
     with warnings.catch_warnings():
-        # numpy 2.2 对 np.str/np.object 的访问/赋值会发 FutureWarning
+        # numpy 2.2 emits FutureWarning on access/assignment to np.str/np.object
         warnings.simplefilter("ignore", FutureWarning)
         for name, val in aliases.items():
             if not hasattr(np, name):
@@ -53,11 +54,11 @@ def _numpy_compat_shim() -> None:
 
 
 class GsvEngine:
-    """GPT-SoVITS 推理引擎。构造即加载全部模型（S1+S2+BERT+CNHuBERT+SV）。"""
+    """GPT-SoVITS inference engine. Loading all models (S1+S2+BERT+CNHuBERT+SV) happens at construction."""
 
     def __init__(self, config: Optional[dict] = None):
         self._lock = threading.RLock()
-        self._raw_config = dict(config or {})   # 角色配置原始值（resolve_config 前，用于判断是否显式指定权重）
+        self._raw_config = dict(config or {})   # Raw role config values (before resolve_config; used to decide whether weights were explicitly specified)
         self._cfg = gsv_paths.resolve_config(config)
         self._vendor_root: Path = VENDOR_ROOT
         self._tts = None
@@ -66,7 +67,7 @@ class GsvEngine:
 
         _numpy_compat_shim()
         ensure_vendor(auto_copy=True)
-        # junction 按解析后的配置再确认一次（env 覆盖了目标时）
+        # Re-confirm junctions against the resolved config (when env overrides the target)
         ensure_links({
             PACKAGE_DIR / "text/G2PWModel": Path(self._cfg["g2pw_dir"]),
             PACKAGE_DIR / "pretrained_models/sv": Path(self._cfg["sv_dir"]),
@@ -81,11 +82,11 @@ class GsvEngine:
             _setup_sec = _time.perf_counter() - _rt_t0
             self._load_models(setup_sec=_setup_sec)
 
-    # ---------------------------------------------------------------- 环境
+    # ── Environment ──
 
     @contextmanager
     def _vendor_ctx(self) -> Iterator[None]:
-        """锁 + CWD=vendor 根，退出时恢复 CWD。所有 vendored 调用必须在其内。"""
+        """Lock + CWD=vendor root, restoring CWD on exit. All vendored calls must run inside it."""
         with self._lock:
             prev = os.getcwd()
             os.chdir(self._vendor_root)
@@ -95,25 +96,26 @@ class GsvEngine:
                 os.chdir(prev)
 
     def _setup_runtime(self) -> None:
-        """一次性环境准备: sys.path + env（须在 CWD=vendor 下执行）。"""
+        """One-time environment setup: sys.path + env (must run with CWD=vendor)."""
         for p in (str(self._vendor_root), str(self._vendor_root / "GPT_SoVITS")):
             if p not in sys.path:
                 sys.path.insert(0, p)
-        # 确保 vendored TTS.py / tools 的裸名 ffmpeg 调用命中项目自带副本
+        # Ensure bare-name ffmpeg calls from vendored TTS.py / tools hit the project's bundled copy
         from app.ffmpeg import ensure_ffmpeg_on_path
 
         ensure_ffmpeg_on_path()
-        # chinese2.py:35 的 G2PWPinyin(model_source=...) 读取该 env
+        # The G2PWPinyin(model_source=...) in chinese2.py:35 reads this env
         os.environ["bert_path"] = self._cfg["bert_base_path"]
         self._patch_torchaudio_load()
 
     def _patch_torchaudio_load(self) -> None:
-        """torchaudio.load → soundfile 等价实现（torchcodec 与 torch 2.13 ABI 不兼容）。
+        """torchaudio.load → soundfile equivalent implementation (torchcodec is ABI-incompatible with torch 2.13).
 
-        torchaudio 2.9+ 移除 set_audio_backend，load 默认走 torchcodec，而
-        torchcodec 0.16 的 DLL 在 torch 2.13 下加载失败；vendored 仅在
-        TTS.py:772 以 ``torchaudio.load(path)`` 读取参考音频（wav 约定），
-        此处替换为 soundfile 实现（dtype float32, (ch, N) 张量语义一致）。
+        torchaudio 2.9+ removed set_audio_backend; load defaults to torchcodec, whose
+        DLL in torchcodec 0.16 fails to load under torch 2.13. The vendored code only
+        reads the reference audio via ``torchaudio.load(path)`` in TTS.py:772 (wav
+        convention), so this is replaced with a soundfile implementation (dtype
+        float32, same (ch, N) tensor semantics).
         """
         import torchaudio  # noqa: F401
 
@@ -127,7 +129,7 @@ class GsvEngine:
         torchaudio.load = _load_sf
 
     def _import_tts(self):
-        """惰性 import vendored TTS 类（首次构造时执行）。"""
+        """Lazily import the vendored TTS class (executed on first construction)."""
         from TTS_infer_pack.TTS import TTS, TTS_Config  # noqa: E402
 
         return TTS, TTS_Config
@@ -140,9 +142,9 @@ class GsvEngine:
         TTS, TTS_Config = self._import_tts()
         t1 = time.perf_counter()
 
-        import sv  # noqa: E402 — vendored sv.py（模块级已随 TTS import 加载）
+        import sv  # noqa: E402 — vendored sv.py (module-level already loaded with the TTS import)
 
-        # sv.py:6 硬编码的相对路径 → 绝对路径（SV.__init__ 运行时读取模块全局）
+        # sv.py:6 hard-coded relative path → absolute path (SV.__init__ reads the module global at runtime)
         sv.sv_path = self._cfg["sv_path"]
 
         custom = {
@@ -166,12 +168,13 @@ class GsvEngine:
         )
 
     def _normalize_cpu_dtype(self) -> None:
-        """CPU 模式统一子模型为 float32（权重可能是 fp16 精简版）。
+        """Normalize sub-models to float32 on CPU (weights may be fp16 slim versions).
 
-        官方权重为 fp32，但社区/精简版（如 0.19GB 的 s2Gv2ProPlus.pth）常为
-        fp16；vendored TTS 仅按 is_half 转换、CPU 时保留权重原始 dtype，
-        导致 conv1d 报 FloatTensor/HalfTensor 不匹配。此处加载后整体 .float()
-        归一化（幂等，不影响 CUDA 路径——CUDA 按 is_half 各自处理）。
+        Official weights are fp32, but community/slim versions (e.g. the 0.19GB
+        s2Gv2ProPlus.pth) are often fp16; the vendored TTS only converts per is_half
+        and keeps the weight's original dtype on CPU, causing conv1d
+        FloatTensor/HalfTensor mismatches. A global .float() normalization is applied
+        after loading (idempotent, no effect on the CUDA path — CUDA handles each per is_half).
         """
         if str(self._cfg["device"]) == "cpu":
             for attr in ("cnhuhbert_model", "bert_model", "vits_model",
@@ -182,13 +185,13 @@ class GsvEngine:
                 try:
                     m.float()
                 except Exception:
-                    pass  # 个别属性非 nn.Module 时忽略
+                    pass  # ignore individual attributes that are not nn.Module
 
-    # ---------------------------------------------------------------- 推理
+    # ── Inference ──
 
     @staticmethod
     def _abs_path(p) -> str:
-        """相对路径按调用方 CWD 绝对化（进入 vendor 上下文前调用）。None/空返回空串。"""
+        """Resolve relative paths to absolute against the caller's CWD (call before entering the vendor context). Returns empty string for None/empty."""
         if not p:
             return ""
         p = os.fspath(p)
@@ -204,7 +207,7 @@ class GsvEngine:
         return_fragment: bool,
         params: dict,
     ) -> dict:
-        """构造与 GUI inference() 逐键一致的 inputs（inference_webui_fast.py:175-196）。"""
+        """Build inputs matching the GUI inference() key for key (inference_webui_fast.py:175-196)."""
         seed = params.pop("seed", -1)
         actual_seed = seed if seed not in [-1, "", None] else random.randint(0, 2**32 - 1)
         self.last_seed = actual_seed
@@ -244,9 +247,10 @@ class GsvEngine:
         prompt_lang: str = "",
         **params,
     ) -> Iterator[tuple[int, np.ndarray]]:
-        """逐分片合成（GUI 流式语义）: 每个 yield 为 (sr, np.int16)。
+        """Synthesize fragment by fragment (GUI streaming semantics): each yield is (sr, np.int16).
 
-        支持中途调用 stop() 提前结束。参考音频超 3~10s 范围抛 OSError。
+        Supports calling stop() mid-stream to end early. Raises OSError if the
+        reference audio is outside the 3~10s range.
         """
         if self._released:
             raise RuntimeError("engine already released")
@@ -267,7 +271,7 @@ class GsvEngine:
         prompt_lang: str = "",
         **params,
     ) -> tuple[int, np.ndarray]:
-        """合成整段音频（GUI 合成按钮语义）: 返回 (sr, np.int16)。"""
+        """Synthesize a whole audio clip (GUI synthesize-button semantics): returns (sr, np.int16)."""
         chunks: list[np.ndarray] = []
         sr = None
         for sr, frag in self.synth_stream(
@@ -288,7 +292,7 @@ class GsvEngine:
         prompt_lang: str = "ja",
         **params,
     ) -> dict:
-        """合成并写 wav（int16）: 返回 {audio_path, sample_rate, duration}。"""
+        """Synthesize and write a wav (int16): returns {audio_path, sample_rate, duration}."""
         import soundfile
 
         sr, audio = self.synth(
@@ -313,17 +317,18 @@ class GsvEngine:
         role_ref_audio: str,
         **params,
     ) -> Iterator[tuple[int, np.ndarray]]:
-        """严格双参考: 情绪音频 → S1 语义, 角色音频 → S2 谱/SV（音色锚定）。
+        """Strict dual-reference: emotion audio → S1 semantics, role audio → S2 spectrum/SV (timbre anchoring).
 
-        prompt_cache 编排（零 vendor 改动，对照 TTS.py:1131-1137 缓存比对逻辑）:
-          1. set_ref_audio(情绪音频)   → prompt_semantic/refer_spec 均来自情绪音频
-          2. 保存 emotion_semantic
-          3. set_ref_audio(角色音频)   → refer_spec + 16k 音频（SV 每次 run 重算）锚定角色
-          4. 回写 cache["prompt_semantic"] → S1 继续用情绪语义
-          5. run(ref=角色路径, prompt_text=情绪文本) → 路径命中缓存不重算，S1 情绪 / S2 角色
+        prompt_cache orchestration (zero vendor changes, per the cache-comparison logic in TTS.py:1131-1137):
+          1. set_ref_audio(emotion audio)  → prompt_semantic/refer_spec both come from the emotion audio
+          2. Save emotion_semantic
+          3. set_ref_audio(role audio)     → refer_spec + 16k audio (SV recomputed each run) anchors the role
+          4. Write back cache["prompt_semantic"] → S1 keeps using the emotion semantics
+          5. run(ref=role path, prompt_text=emotion text) → path hits cache without recompute, S1 emotion / S2 role
 
-        两个参考均受 3~10s 硬校验（TTS.py:814-816）。情绪跟随源音频、音色锚定角色——
-        v2ProPlus 未实测的架构命题，音色残余漂移由 SV 相似度实证判定。
+        Both references are subject to the 3~10s hard validation (TTS.py:814-816). Emotion follows the
+        source audio while timbre is anchored to the role — an untested architectural proposition for
+        v2ProPlus; residual timbre drift is judged empirically by SV similarity.
         """
         if self._released:
             raise RuntimeError("engine already released")
@@ -342,44 +347,45 @@ class GsvEngine:
             for item in tts.run(inputs):  # GUI: for item in tts_pipeline.run(inputs)
                 yield item
 
-    # ---------------------------------------------------------------- GUI 同款控制
+    # ── GUI-matching Controls ──
 
     def set_ref_audio(self, ref_audio_path: str) -> None:
-        """预置参考音频（预热 prompt_cache，对应 GUI 切换参考音频语义）。
+        """Preset the reference audio (warm up prompt_cache, matching the GUI reference-audio switch semantics).
 
-        参考音频时长须在 3~10s 内，否则抛 OSError。
+        The reference audio must be 3~10s long, otherwise OSError is raised.
         """
         ref_audio_path = self._abs_path(ref_audio_path)
         with self._vendor_ctx():
             self._tts.set_ref_audio(ref_audio_path)
 
     def change_sovits_weights(self, weights_path: str) -> None:
-        """热切换 S2 权重（GUI change_sovits_weights 同款，Pro 自动重载 SV）。"""
+        """Hot-swap the S2 weights (same as the GUI change_sovits_weights; Pro auto-reloads SV)."""
         weights_path = self._abs_path(weights_path)
         with self._vendor_ctx():
             self._tts.init_vits_weights(weights_path)
 
     def change_gpt_weights(self, weights_path: str) -> None:
-        """热切换 S1 权重（GUI change_gpt_weights 同款）。"""
+        """Hot-swap the S1 weights (same as the GUI change_gpt_weights)."""
         weights_path = self._abs_path(weights_path)
         with self._vendor_ctx():
             self._tts.init_t2s_weights(weights_path)
 
     def apply_role(self, role_cfg: Optional[dict]) -> None:
-        """热切换角色：仅重建 S1/S2 权重，基础模型（BERT/CNHuBERT/SV/vocoder）常驻。
+        """Hot-swap roles: only rebuild the S1/S2 weights; base models (BERT/CNHuBERT/SV/vocoder) stay resident.
 
-        角色专属的只有 S1(t2s)/S2(vits) 两个权重文件；换角色复用现役引擎
-        依次 init_t2s_weights → init_vits_weights，耗时从全量重建（10~20s）
-        降至秒级。两个必须处理的坑：
-        - CPU dtype：构造时 _normalize_cpu_dtype 只归一一次，热切换替换出的
-          新 S1/S2 若为 fp16 精简权重，需补 .float()（conv1d dtype 不匹配）。
-        - 参考缓存陈旧：run() 缓存命中只比 ref_audio_path（TTS.py:1138-1144），
-          换 S2 后同路径参考音频不会重算（refer_spec/prompt_semantic 按旧 vits
-          计算）——角色配置带 role_ref_audio 时 set_ref_audio 重算预热；否则
-          置 prompt_cache["ref_audio_path"]=None 强制下次 run 重算。
+        Only the two role-specific weight files S1(t2s)/S2(vits) exist; switching roles
+        reuses the live engine via init_t2s_weights → init_vits_weights, dropping the
+        cost from a full rebuild (10~20s) to seconds. Two pitfalls to handle:
+        - CPU dtype: _normalize_cpu_dtype at construction normalizes only once; if the
+          hot-swapped new S1/S2 are fp16 slim weights, apply .float() (conv1d dtype mismatch).
+        - Stale reference cache: run() cache hits compare only ref_audio_path (TTS.py:1138-1144);
+          after switching S2 the same-path reference audio is not recomputed
+          (refer_spec/prompt_semantic were computed with the old vits) — when the role
+          config carries role_ref_audio, set_ref_audio recomputes and warms it; otherwise
+          set prompt_cache["ref_audio_path"]=None to force recompute on the next run.
 
-        假定同 version 家族切换（当前角色配置全部 v2ProPlus）；跨版本仍需
-        全量重建。
+        Assumes switching within the same version family (all current role configs are v2ProPlus);
+        cross-version still requires a full rebuild.
         """
         if self._released or self._tts is None:
             raise RuntimeError("engine not ready for role switch")
@@ -387,14 +393,14 @@ class GsvEngine:
         t2s = role_cfg.get("t2s_weights_path") or self._cfg["t2s_weights_path"]
         vits = role_cfg.get("vits_weights_path") or self._cfg["vits_weights_path"]
         ref = role_cfg.get("role_ref_audio")
-        # 路径绝对化须在 vendor 上下文之外（按调用方 CWD，与 synth_stream 同模式）
+        # Paths must be absolutized outside the vendor context (per caller CWD, same pattern as synth_stream)
         t2s_abs = self._abs_path(t2s)
         vits_abs = self._abs_path(vits)
         ref_abs = self._abs_path(ref) if ref else None
         with self._vendor_ctx():
             self._tts.init_t2s_weights(t2s_abs)
             self._tts.init_vits_weights(vits_abs)
-            # CPU 归一：热切换替换出的新模块补 float32（构造时一次性归一不覆盖）
+            # CPU normalization: add float32 to modules replaced by hot-swap (one-time construction normalization does not cover them)
             if str(self._cfg["device"]) == "cpu":
                 for attr in ("t2s_model", "vits_model"):
                     m = getattr(self._tts, attr, None)
@@ -414,25 +420,26 @@ class GsvEngine:
                         "角色参考音频预热失败（run 时重算兜底）: %s", ex
                     )
             else:
-                # 无参考音频：使旧缓存失效（run 命中判断只比 ref_audio_path）
+                # No reference audio: invalidate the stale cache (run hit checks only ref_audio_path)
                 self._tts.prompt_cache["ref_audio_path"] = None
-        # 记录新角色（weights_status 的 *specified/*configured 语义保持）
+        # Record the new role (preserving the *specified/*configured semantics of weights_status)
         self._raw_config = dict(role_cfg)
         self._cfg["t2s_weights_path"] = t2s_abs
         self._cfg["vits_weights_path"] = vits_abs
 
     def stop(self) -> None:
-        """请求停止当前合成（GUI stop 按钮同款: 置 stop_flag，run 提前结束）。
+        """Request to stop the current synthesis (same as the GUI stop button: sets stop_flag, run ends early).
 
-        不持锁 —— 必须在其他线程（正在消费 synth_stream 的线程）执行期间调用；
-        stop_flag 为普通布尔，GIL 保证原子性。
+        Does not hold the lock — must be called while another thread (the one consuming
+        synth_stream) is executing; stop_flag is a plain bool and atomicity is
+        guaranteed by the GIL.
         """
         tts = self._tts
         if tts is not None:
             tts.stop()
 
     def release(self) -> None:
-        """释放模型与显存（finally 语义: del + empty_cache）。"""
+        """Release models and GPU memory (finally semantics: del + empty_cache)."""
         if self._released:
             return
         with self._vendor_ctx():
@@ -450,7 +457,7 @@ class GsvEngine:
         except Exception:
             pass
 
-    # ---------------------------------------------------------------- 属性
+    # ── Properties ──
 
     @property
     def version(self) -> str:
@@ -465,12 +472,12 @@ class GsvEngine:
         return dict(self._cfg)
 
     def weights_status(self) -> dict:
-        """返回 S1/S2 权重加载状态，供服务启动日志判断“角色权重是否加载”。
+        """Return the S1/S2 weight loading status, for service startup logs to judge whether role weights are loaded.
 
-        - ``*_specified``：角色配置是否显式指定了该权重路径。
-        - ``*_configured``：角色配置解析后的绝对权重路径（未指定时取默认路径）。
-        - ``*_used``：TTS_Config 实际采用的权重路径（含默认回退后的结果）。
-        - ``*_role_loaded``：实际使用的权重是否就是角色配置指定的权重。
+        - ``*_specified``: whether the role config explicitly specified this weight path.
+        - ``*_configured``: the absolute weight path resolved from the role config (default path when unspecified).
+        - ``*_used``: the weight path TTS_Config actually used (including the result after default fallback).
+        - ``*_role_loaded``: whether the weight actually used is the one specified by the role config.
         """
         cfg = self._cfg
         raw = self._raw_config

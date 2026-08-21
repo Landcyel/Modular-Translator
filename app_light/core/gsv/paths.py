@@ -1,6 +1,6 @@
-"""模型权重路径解析: dependencies/models/ 相对项目根 + GSV_* 环境变量覆盖。
+"""Model weight path resolution: dependencies/models/ relative to the project root + GSV_* env overrides.
 
-默认（v2ProPlus 主线）:
+Defaults (v2ProPlus mainline):
 - s1/t2s : dependencies/models/v4/s1v3.ckpt
 - s2/vits: dependencies/models/gsv/v2proplus/s2Gv2ProPlus.pth
 - bert   : dependencies/models/v4/chinese-roberta-wwm-ext-large
@@ -8,9 +8,9 @@
 - sv     : dependencies/models/gsv/sv/pretrained_eres2netv2w24s4ep4.ckpt
 - g2pw   : dependencies/models/gsv/g2pw/G2PWModel
 - langdetect: dependencies/models/gsv/fast_langdetect
-- vocoder: dependencies/models/v4/gsv-v4-pretrained （v4 用）
+- vocoder: dependencies/models/v4/gsv-v4-pretrained (used by v4)
 
-环境变量覆盖（优先级高于 config dict 默认，低于 config dict 显式传值）:
+Env overrides (higher priority than config dict defaults, lower than explicit config dict values):
 GSV_T2S_PATH / GSV_VITS_PATH / GSV_BERT_PATH / GSV_HUBERT_PATH /
 GSV_SV_PATH / GSV_G2PW_DIR / GSV_LANGDETECT_DIR / GSV_VOCODER_DIR
 """
@@ -24,9 +24,9 @@ from typing import Optional
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODELS_ROOT = PROJECT_ROOT / "dependencies" / "models"
 
-# 各版本默认 s2（s1 全部共用 s1v3.ckpt）
+# Per-version default s2 (all versions share s1v3.ckpt for s1)
 DEFAULT_VITS = {
-    "v1": "dependencies/models/v4/gsv-v4-pretrained/s2Gv4.pth",  # 占位（本仓库未备 v1/v2/v3 权重）
+    "v1": "dependencies/models/v4/gsv-v4-pretrained/s2Gv4.pth",  # Placeholder (this repo does not ship v1/v2/v3 weights)
     "v2": "dependencies/models/v4/gsv-v4-pretrained/s2Gv4.pth",
     "v2Pro": "dependencies/models/gsv/v2proplus/s2Gv2ProPlus.pth",
     "v2ProPlus": "dependencies/models/gsv/v2proplus/s2Gv2ProPlus.pth",
@@ -48,9 +48,9 @@ def _env_or(key: str, default: Path) -> Path:
 
 
 def resolve_config(config: Optional[dict] = None) -> dict:
-    """归一化引擎配置: 全部路径转绝对路径，补全默认值。
+    """Normalize the engine config: convert all paths to absolute and fill in defaults.
 
-    返回 dict 键:
+    Returned dict keys:
     version / device / is_half / t2s_weights_path / vits_weights_path /
     bert_base_path / cnhuhbert_base_path / sv_path / sv_dir / g2pw_dir /
     langdetect_dir / vocoder_dir
@@ -102,11 +102,13 @@ def resolve_config(config: Optional[dict] = None) -> dict:
 
 
 def merge_service_role(service_cfg: Optional[dict], role_cfg: Optional[dict]) -> dict:
-    """合并 GSV 服务配置（models/gsv/default.json）与角色配置（tts/roles/role-*.json）。
+    """Merge the GSV service config (models/gsv/default.json) with the role config (tts/roles/role-*.json).
 
-    角色配置覆盖服务配置的同名键（S1/S2 权重仅角色配置携带，服务配置
-    不含 t2s/vits 键，避免 weights_status() 的"角色显式指定"语义被默认值污染）。
-    无角色配置时仅返回服务配置（引擎用默认权重加载）。
+    Role config overrides service config keys of the same name (S1/S2 weights are
+    carried only by the role config; the service config has no t2s/vits keys, so the
+    "explicitly specified by role" semantics of weights_status() are not polluted by
+    defaults). With no role config, returns only the service config (the engine loads
+    with default weights).
     """
     merged = dict(service_cfg or {})
     if role_cfg:

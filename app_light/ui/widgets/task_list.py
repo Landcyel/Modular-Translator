@@ -1,10 +1,10 @@
-"""可复用的任务列表面板 — 拆分版。
+"""Reusable task list panel — split edition.
 
-组件：
-- task_queue_panel()  等待+运行中任务队列
-- task_card()         单任务卡片
-- _task_status_icon() 状态图标
-- _task_progress_bar() 进度条
+Components:
+- task_queue_panel()  waiting + running task queue
+- task_card()         single task card
+- _task_status_icon() status icon
+- _task_progress_bar() progress bar
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ _TYPE_COLOR = {
 
 
 def _task_status_icon(status: str) -> ft.Container:
-    """任务状态图标（无背景）。"""
+    """Task status icon (no background)."""
     icon, color = _STATUS_MAP.get(status, (ft.Icons.HELP, "#94A3B8"))
     return ft.Container(
         content=_icon(icon, 14, color),
@@ -48,7 +48,7 @@ def _task_status_icon(status: str) -> ft.Container:
 
 
 def _task_progress_bar(progress: float) -> ft.ProgressBar | ft.Container:
-    """运行中任务显示 0-1 进度条（圆角 + 轨道色 + 末端圆点收尾）。"""
+    """Show a 0-1 progress bar for running tasks (rounded + track color + end-dot finish)."""
     if 0.0 < progress <= 1.0:
         return ft.ProgressBar(
             value=progress, bar_height=4,
@@ -62,7 +62,7 @@ def _task_progress_bar(progress: float) -> ft.ProgressBar | ft.Container:
 
 
 def _lrc_time(seconds: float) -> str:
-    """LRC 风格时间戳：``[MM:SS.cs]``（方案文档格式）。"""
+    """LRC-style timestamp: ``[MM:SS.cs]`` (design-doc format)."""
     seconds = max(0.0, float(seconds))
     minutes = int(seconds // 60)
     rest = seconds - minutes * 60
@@ -70,7 +70,7 @@ def _lrc_time(seconds: float) -> str:
 
 
 def _task_progress_text(task) -> str:
-    """生成任务进度文本（running 含百分比 + 类型专属进度详情）。"""
+    """Generate task progress text (running includes a percentage + type-specific progress detail)."""
     status = getattr(task, "status", "") if not isinstance(task, dict) else task.get("status", "")
     progress = float(getattr(task, "progress", 0) if not isinstance(task, dict) else task.get("progress", 0))
     error = getattr(task, "error", "") if not isinstance(task, dict) else task.get("error", "")
@@ -79,18 +79,18 @@ def _task_progress_text(task) -> str:
 
     if status == "failed" and error:
         return error[:40]
-    # MOSS 模型懒加载期 progress==0 也需显示加载状态文本（如 · loading_model），
-    # 其余任务（含 Whisper）保持首段前无文案
+    # During MOSS model lazy-loading, progress==0 still needs loading-status text
+    # (e.g. · loading_model); other tasks (incl. Whisper) show nothing before the first segment
     elif status == "running" and (progress > 0 or ttype == "moss"):
         payload = (task.get("payload", {}) if isinstance(task, dict)
                    else getattr(task, "payload", {})) or {}
-        # ── GSV 合成：pos/total 是片段序号/预估片段数，不是秒 ──
+        # ── GSV synthesis: pos/total are segment index / estimated segment count, not seconds ──
         if ttype == "gsv":
             if isinstance(payload, dict) and payload.get("total"):
                 return f"{int(progress * 100)}% · 片段 {int(payload.get('pos', 0))}/{int(payload['total'])}"
             return f"{int(progress * 100)}%"
-        # ── 转写统一详情：pos/total（秒）→ LRC 时间戳，speed → v/s ──
-        # 仅保留百分比 / [已完成时长/总时长] / 速度 v/s（unit=ratio 为时长探测失败回退）
+        # ── Transcription unified detail: pos/total (seconds) → LRC timestamp, speed → v/s ──
+        # Keep only percentage / [elapsed/total] / speed v/s (unit=ratio means duration-probe fallback)
         detail = ""
         if (isinstance(payload, dict)
                 and payload.get("pos")
@@ -115,11 +115,11 @@ def task_card(
     role: str = "waiting",   # "current" | "waiting"
     callbacks: dict | None = None,
 ) -> ft.Container:
-    """单个任务卡片。
+    """Single task card.
 
     Args:
-        task: TaskSnapshot 或 dict
-        role: "current" = 当前运行任务（只显示取消），"waiting" = 等待中（显示上移/下移/取消）
+        task: TaskSnapshot or dict
+        role: "current" = currently running task (only cancel shown), "waiting" = waiting (shows move up/down/cancel)
         callbacks: {"on_cancel", "on_move_up", "on_move_down"}
     """
     cb = callbacks or {}
@@ -147,10 +147,10 @@ def task_card(
     )
     if status == "cancelled":
         detail_color = "#F59E0B"
-    # 运行中百分比文本加粗（与进度条呼应），其余状态常规
+    # running percentage text is bold (matching the progress bar); other states are regular
     detail_weight = "w600" if status == "running" else "normal"
 
-    # 操作按钮
+    # action buttons
     actions = []
     if role == "waiting" and status == "pending":
         if cb.get("on_move_up"):
@@ -209,22 +209,22 @@ def task_queue_panel(
     max_items: int = 8,
     expand: bool | int = True,
 ) -> ft.Container:
-    """任务队列面板 — 当前任务 + 等待任务列表。
+    """Task queue panel — current task + waiting task list.
 
     Args:
-        current_task: 当前运行任务（TaskSnapshot 或 None）
-        waiting_tasks: 等待中任务列表
+        current_task: currently running task (TaskSnapshot or None)
+        waiting_tasks: list of waiting tasks
         callbacks: {"on_cancel", "on_move_up", "on_move_down", "on_clear", "on_pause_toggle", "is_paused"}
-        empty_text: 空状态文案
-        max_items: 最大显示条目
-        expand: 扩展比例
+        empty_text: empty-state text
+        max_items: max displayed items
+        expand: expand ratio
     """
     waiting_tasks = waiting_tasks or []
     cb = callbacks or {}
 
     task_rows = []
 
-    # 当前任务卡片
+    # current task card
     if current_task:
         task_rows.append(
             ft.Column([
@@ -233,7 +233,7 @@ def task_queue_panel(
             ], spacing=4)
         )
 
-    # 等待任务
+    # waiting tasks
     if waiting_tasks:
         task_rows.append(
             ft.Column([
@@ -242,7 +242,7 @@ def task_queue_panel(
             ], spacing=4)
         )
 
-    # 空状态
+    # empty state
     if not task_rows:
         task_rows.append(
             ft.Container(
@@ -259,7 +259,7 @@ def task_queue_panel(
             )
         )
 
-    # 暂停/恢复按钮
+    # pause/resume button
     is_paused = cb.get("is_paused", False)
     pause_label = "恢复" if is_paused else "暂停"
     pause_icon = ft.Icons.PLAY_ARROW if is_paused else ft.Icons.PAUSE
@@ -272,7 +272,7 @@ def task_queue_panel(
         style=ft.ButtonStyle(color=pause_color, padding=ft.Padding.all(4)),
     ) if cb.get("on_pause_toggle") else None
 
-    # 清空按钮
+    # clear button
     clear_btn = ft.TextButton(
         "清空", icon=ft.Icons.CLEAR_ALL,
         on_click=lambda e: cb.get("on_clear")() if cb.get("on_clear") else None,
@@ -296,6 +296,6 @@ def task_queue_panel(
         padding=ft.Padding.all(16),
         border=ft.Border.all(1, Palette.BORDER_SUBTLE),
         shadow=_shadow("low"),
-        # 高度不再固定：由父级 workspace(expand) 撑满，底边完整显示
+        # height no longer fixed: filled by the parent workspace(expand), bottom edge fully shown
         expand=expand,
     )

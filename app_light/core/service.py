@@ -20,9 +20,7 @@ from app.paths import project_root as _PROJECT_ROOT
 from app.torch_runtime import ensure_available, describe
 
 
-# ═══════════════════════════════════════════════════════════
-# 抽象基类
-# ═══════════════════════════════════════════════════════════
+# ── Abstract base class ──
 
 class Service(ABC):
     """Abstract backend service with start/stop lifecycle and executor access."""
@@ -31,9 +29,9 @@ class Service(ABC):
         self._config = config
         self._running = False
         self._on_status_change = on_status_change
-        self._on_log = None  # 诊断日志回调（UI 接线；无回调退化 print）
-        # 实际工作设备：'cpu' | 'cuda' | 'api'，仅在服务真正加载成功时赋值
-        # （start() 内），stop()/加载失败时保持/重置为 None
+        self._on_log = None  # diagnostic log callback (wired by UI; falls back to print without one)
+        # actual working device: 'cpu' | 'cuda' | 'api', assigned only when the service
+        # actually loads successfully (inside start()); kept/reset to None on stop()/load failure
         self.device: Optional[str] = None
 
     @abstractmethod
@@ -64,21 +62,21 @@ class Service(ABC):
 
     @property
     def actual_device(self) -> Optional[str]:
-        """兼容别名：实际工作设备标识（cuda / cpu / api / None=未加载）。
+        """Compatibility alias: the actual working device (cuda / cpu / api / None=not loaded).
 
-        由 :attr:`device` 承载——子类在 start() 实际加载成功后赋值，
-        stop() 重置为 None。
+        Backed by :attr:`device` — subclasses assign it after start() actually loads
+        successfully; stop() resets it to None.
         """
         return self.device
 
     @staticmethod
     def _normalize_device(value) -> Optional[str]:
-        """归一化设备值为三值域：``'cuda' | 'cpu' | 'api'``。
+        """Normalize a device value into one of three domains: ``'cuda' | 'cpu' | 'api'``.
 
         - ``"cuda"`` / ``"cuda:0"`` / ``"cuda:1"`` → ``"cuda"``
-        - ``"cpu"`` / ``"api"`` → 原样
-        - ``"auto"`` → 按 torch 探测（cuda 可用则 cuda，否则 cpu）
-        - None / 空 / 其它 → None
+        - ``"cpu"`` / ``"api"`` → as-is
+        - ``"auto"`` → probed via torch (cuda if available, else cpu)
+        - None / empty / other → None
         """
         if value is None:
             return None
@@ -96,19 +94,19 @@ class Service(ABC):
         return None
 
     def set_on_status_change(self, callback: Optional[Callable]):
-        """注入/替换状态变化回调（running, device）。"""
+        """Inject/replace the status-change callback (running, device)."""
         self._on_status_change = callback
 
     def set_on_log(self, callback: Optional[Callable]):
-        """注入/替换诊断日志回调（level, message）；无回调时退化 print。
+        """Inject/replace the diagnostic log callback (level, message); falls back to print without one.
 
-        core 零 UI 依赖：回调由 AppFacade 接线到 AppLog；测试脚本/库调用
-        不接线时保持原 print 行为。
+        core has zero UI dependencies: the callback is wired to AppLog by AppFacade;
+        test scripts / library callers that do not wire it keep the original print behavior.
         """
         self._on_log = callback
 
     def _log(self, level: str, message: str) -> None:
-        """记录一条诊断日志（level: info/warn/error）。"""
+        """Record a diagnostic log entry (level: info/warn/error)."""
         if self._on_log is not None:
             try:
                 self._on_log(level, message)
@@ -138,9 +136,7 @@ class Service(ABC):
         return self._running
 
 
-# ═══════════════════════════════════════════════════════════
-# LlamaService — manages llama-server process + Translator
-# ═══════════════════════════════════════════════════════════
+# ── LlamaService — manages llama-server process + Translator ──
 
 class LlamaService(Service):
     """Manage a llama-server subprocess and provide a Translator executor.
@@ -165,11 +161,11 @@ class LlamaService(Service):
         self._server_args: dict = {}
         self._url: str = ""
         self._config_path = model_config if isinstance(model_config, (str, Path)) else None
-        self._devices: Optional[list] = None   # 初次加载探测的 CUDA 设备列表（重载沿用）
+        self._devices: Optional[list] = None   # CUDA device list probed on first load (reused across reloads)
 
         self._resolve_config(model_config)
 
-    # ── Config resolution ─────────────────────────────
+    # ── Config resolution ──
 
     def _resolve_config(self, config) -> dict:
         """Load a llama-server config and derive server launch settings.
@@ -181,8 +177,8 @@ class LlamaService(Service):
         """
         cfg = super()._resolve_config(config)
         self._config = cfg
-        # 空 llama_path 视为未配置（None）→ _start_llama_server 报"llama_path 未配置"；
-        # 否则解析为项目根下的绝对路径。
+        # empty llama_path means not configured (None) → _start_llama_server reports
+        # "llama_path not configured"; otherwise resolved to an absolute path under the project root.
         lp = cfg.get("llama_path", "")
         self._llama_path = None if not lp else (_PROJECT_ROOT / lp).resolve()
         self._server_args = cfg.get("server_arg", {})
@@ -191,14 +187,15 @@ class LlamaService(Service):
         self._url = f"http://{host}:{port}"
         return cfg
 
-    # ── Service interface ─────────────────────────────
+    # ── Service interface ──
 
     def start(self):
         if self._running:
             return
 
-        # 设备可用性（CUDA 列表）探测仅在初次加载执行——机器级事实，重载沿用
-        # 初次结果，避免每次重载都拉起 llama-server --list-devices 探测（慢）
+        # device-availability (CUDA list) probing runs only on first load — a
+        # machine-level fact reused across reloads, avoiding a slow
+        # llama-server --list-devices probe on every reload
         if self._devices is None and self._config_path is not None:
             try:
                 self._devices = LlamaService.get_device_list(self._config_path)
@@ -214,17 +211,17 @@ class LlamaService(Service):
         self._start_llama_server()
         from .executor import LlamaTranslator
         self._executor = LlamaTranslator(self._config)
-        self._executor.set_on_log(self._log)  # 诊断日志透传（服务 → executor）
+        self._executor.set_on_log(self._log)  # forward diagnostic logs (service → executor)
         try:
             self._executor._wait_for_preparing(timeout=120, is_print=True)
         except Exception as ex:
             self._log("error", f"llama 模型准备超时/失败: {ex}")
             raise
 
-        self.device = self._resolve_llama_device()  # 实际加载成功后才赋值
+        self.device = self._resolve_llama_device()  # assign only after actual load succeeds
         self._log("info", self._describe_actual_device())
         self._running = True
-        self._emit()  # 状态推送：start 完成 → running=True
+        self._emit()  # state push: start done → running=True
 
     def stop(self):
         if not self._running:
@@ -235,8 +232,8 @@ class LlamaService(Service):
 
         self._executor = None
         self._running = False
-        self.device = None  # 服务已停止，设备不再有意义
-        self._emit()  # 状态推送：stop 完成 → running=False
+        self.device = None  # service stopped; device no longer meaningful
+        self._emit()  # state push: stop done → running=False
 
     def restart(self, config: dict):
         """Stop the running server (if any), apply *config*, and start again."""
@@ -268,9 +265,10 @@ class LlamaService(Service):
             cmd.append(key)
             cmd.append(str(value))
 
-        # Windows 下隐藏 llama-server 的控制台窗口（主程序 --noconsole 无控制台，
-        # 控制台子进程否则会各自新建 cmd 窗口）；CREATE_NO_WINDOW 不影响
-        # stdout=PIPE 日志接管与 terminate()/kill() 生命周期。
+        # hide llama-server's console window on Windows (the packaged main program runs
+        # with --noconsole, otherwise each console child would spawn its own cmd window);
+        # CREATE_NO_WINDOW does not affect stdout=PIPE log capture or the
+        # terminate()/kill() lifecycle.
         popen_kwargs: dict = {}
         if os.name == "nt":
             popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -311,7 +309,7 @@ class LlamaService(Service):
         self._process = None
 
     def _describe_actual_device(self) -> str:
-        """服务加载完成后的实际工作设备描述（供 start() 记录日志）。"""
+        """Description of the actual working device after the service loads (for start() logging)."""
         server_args = self._server_args or {}
         if "--device" in server_args:
             return f"llama 实际工作设备: {server_args['--device']}（server_arg 显式指定）"
@@ -323,7 +321,7 @@ class LlamaService(Service):
         return "llama 实际工作设备: CPU（未探测到 CUDA，-ngl auto 不加载 GPU 层）"
 
     def _resolve_llama_device(self) -> Optional[str]:
-        """加载完成后解析实际工作设备：显式 --device 优先，否则按 CUDA 探测结果。"""
+        """Resolve the actual working device after load: explicit --device wins, else based on the CUDA probe result."""
         server_args = self._server_args or {}
         if "--device" in server_args:
             dv = str(server_args["--device"]).lower()
@@ -337,9 +335,9 @@ class LlamaService(Service):
     def _drain_output(self):
         """Continuously read subprocess stdout to prevent pipe buffer deadlock.
 
-        同时把子进程输出转发到诊断日志：error/fail 行记 error、cuda 相关行记
-        warn（如 CUDA 初始化失败），进程退出时记录退出码——原实现把服务器
-        自身错误全部丢弃。
+        Also forwards subprocess output to the diagnostic log: error/fail lines are
+        logged as error, cuda-related lines as warn (e.g. CUDA init failure), and the
+        exit code is logged when the process exits.
         """
         try:
             if self._process and self._process.stdout:
@@ -357,7 +355,7 @@ class LlamaService(Service):
         except Exception:
             pass
 
-    # ── Convenience ───────────────────────────────────
+    # ── Convenience ──
 
     @property
     def url(self) -> str:
@@ -375,7 +373,8 @@ class LlamaService(Service):
         llama_path = llama_path / "llama-server.exe"
 
         cmd = [str(llama_path), "--list-devices"]
-        # 打包后主程序无控制台：隐藏探测子进程的 cmd 窗口（同 _start_llama_server）
+        # packaged main program has no console: hide the probe subprocess's cmd window
+        # (same as _start_llama_server)
         run_kwargs: dict = {}
         if os.name == "nt":
             run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -397,9 +396,7 @@ class LlamaService(Service):
         return devices
 
 
-# ═══════════════════════════════════════════════════════════
-# APIService — manages an OpenAI-compatible API Translator
-# ═══════════════════════════════════════════════════════════
+# ── APIService — manages an OpenAI-compatible API Translator ──
 
 class APIService(Service):
     """Provide a Translator executor backed by an OpenAI-compatible cloud API.
@@ -420,7 +417,7 @@ class APIService(Service):
         super().__init__(model_config, on_status_change)
         self._executor = None
 
-    # ── Config resolution ─────────────────────────────
+    # ── Config resolution ──
 
     def _resolve_config(self, config) -> dict:
         """Load an API model config; kwargs pass through unchanged."""
@@ -434,19 +431,20 @@ class APIService(Service):
 
         from .executor import APITranslator
         executor = APITranslator(self._config)
-        executor.set_on_log(self._log)  # 诊断日志透传（服务 → executor）
-        # 启动即检测连通性（短超时）：失败抛 RuntimeError（_running 不置 True、不 emit，
-        # 由 UI 层捕获并刷新为离线状态）；成功后置懒检测标志避免首次翻译重复检测
+        executor.set_on_log(self._log)  # forward diagnostic logs (service → executor)
+        # check connectivity on startup (short timeout): on failure raise RuntimeError
+        # (_running not set, no emit; the UI layer catches it and refreshes to offline);
+        # on success set the lazy-check flag so the first translation does not re-check
         ok, msg = executor.check_connection(timeout=10)
         if not ok:
             self._log("error", f"API 连通性检测失败: {msg}")
             raise RuntimeError(f"API 连通性检测失败：{msg}")
         executor._connection_checked = True
         self._executor = executor
-        self.device = "api"  # 云端 API：无本地计算设备，连通即视为加载成功
+        self.device = "api"  # cloud API: no local compute device; connectivity means loaded
         self._log("info", "API 实际工作设备: 云端 API（本地无计算设备）")
         self._running = True
-        self._emit()  # 状态推送：start 完成 → running=True
+        self._emit()  # state push: start done → running=True
 
     def stop(self):
         if not self._running:
@@ -455,7 +453,7 @@ class APIService(Service):
         self._executor = None
         self._running = False
         self.device = None
-        self._emit()  # 状态推送：stop 完成 → running=False
+        self._emit()  # state push: stop done → running=False
 
     def restart(self, config: dict):
         """Stop (if running), apply *config*, and start again."""
@@ -474,18 +472,17 @@ class APIService(Service):
 get_device_list = LlamaService.get_device_list
 
 
-# ═══════════════════════════════════════════════════════════
-# GsvService — GPT-SoVITS 文本合成（进程内模型型（重引擎服务生命周期模式））
-# ═══════════════════════════════════════════════════════════
+# ── GsvService — GPT-SoVITS TTS (in-process heavy-engine service lifecycle) ──
 
 class GsvService(Service):
-    """GPT-SoVITS 文本合成服务（包装 ``core/gsv.GsvEngine``，进程内常驻）。
+    """GPT-SoVITS text-to-speech service (wraps ``core/gsv.GsvEngine``, resident in-process).
 
-    一个 Service 单元 = 一个角色配置（权重组合 + 默认参数）；``get_executor()``
-    产出可复用 worker。三方案情绪复刻（single/aux/dual）由任务级 ``args`` 的
-    ``ref_mode`` 表达，分发逻辑见 ``GsvTTSExecutor``（core/executor.py）。
-    引擎内部已封装 vendor CWD / RLock 串行 / 3~10s 参考校验 / numpy 2.x 垫片，
-    服务层只负责生命周期。
+    One Service unit = one role configuration (weight combination + default args);
+    ``get_executor()`` yields a reusable worker. The three-mode emotion replication
+    (single/aux/dual) is expressed via the task-level ``ref_mode`` in ``args``;
+    dispatch logic lives in ``GsvTTSExecutor`` (core/executor.py). The engine
+    internally encapsulates vendor CWD / RLock serialization / 3–10s reference
+    validation / numpy 2.x shims; the service layer only manages the lifecycle.
     """
 
     def __init__(self, model_config: dict, on_status_change=None):
@@ -496,7 +493,7 @@ class GsvService(Service):
 
     def _resolve_config(self, config) -> dict:
         cfg = Service._resolve_config(config)
-        # 相对路径基于项目根解析（仿 LlamaService._resolve_config, service.py:137-155）
+        # relative paths resolved against the project root (mirrors LlamaService._resolve_config, service.py:137-155)
         for key in ("t2s_weights_path", "vits_weights_path",
                     "bert_base_path", "cnhuhbert_base_path", "sv_path"):
             if cfg.get(key):
@@ -505,7 +502,7 @@ class GsvService(Service):
         return cfg
 
     def _log_weights_status(self) -> None:
-        """GSV 服务启动后记录角色权重（S1/S2）是否实际加载。"""
+        """After GSV service start, log whether role weights (S1/S2) actually loaded."""
         status = self._engine.weights_status()
 
         for prefix, specified, role_loaded, configured, used in (
@@ -528,16 +525,16 @@ class GsvService(Service):
     def start(self):
         if self._running:
             return
-        ensure_available()  # 运行时缺失时给出安装指引，而不是难懂的 ModuleNotFoundError
-        from .gsv import GsvEngine  # 惰性导入（引擎 import 链重）
+        ensure_available()  # gives install guidance when the runtime is missing, instead of a cryptic ModuleNotFoundError
+        from .gsv import GsvEngine  # lazy import (the engine's import chain is heavy)
 
         self._log("info", "GSV 引擎加载中…（库导入+权重+模型构建，约 15-60s）")
         try:
-            self._engine = GsvEngine(self._config)  # 构造即全量加载（10~20s）
+            self._engine = GsvEngine(self._config)  # construction fully loads the model (10-20s)
         except Exception as ex:
             self._log("error", f"GSV 模型加载失败: {ex}")
             raise
-        self.device = self._normalize_device(self._engine.device)  # 引擎加载成功后才赋值
+        self.device = self._normalize_device(self._engine.device)  # assign only after the engine loads
         self._log_weights_status()
         from .executor import GsvTTSExecutor
 
@@ -559,7 +556,7 @@ class GsvService(Service):
         self._executor = None
         if self._engine is not None:
             try:
-                self._engine.release()  # del 模型引用 + empty_cache（幂等）
+                self._engine.release()  # drop model references + empty_cache (idempotent)
             except Exception:
                 pass
             self._engine = None
@@ -575,12 +572,12 @@ class GsvService(Service):
         self.start()
 
     def switch_role(self, config):
-        """在线切换角色：引擎运行中仅热切换 S1/S2（基础模型常驻，秒级）；
-        服务未运行/已释放时回退全量重启（现状 10~20s）。
+        """Switch role online: with the engine running, hot-swap only S1/S2 (base model stays resident, seconds);
+        falls back to a full restart when the service is not running / already released (currently 10–20s).
 
-        调用方（app/facade.switch_service_config）负责先取消运行中任务。
+        The caller (app/facade.switch_service_config) is responsible for cancelling running tasks first.
         """
-        cfg = self._resolve_config(config)   # 相对路径按项目根绝对化
+        cfg = self._resolve_config(config)   # relative paths absolutized against the project root
         if self._engine is not None and not self._engine._released:
             self._engine.apply_role(cfg)
             self._log_weights_status()

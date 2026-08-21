@@ -1,7 +1,7 @@
-"""MOSS 音频时长探测工具（仅读取容器元数据，不解码音频）。
+"""MOSS audio duration probe (reads only container metadata, does not decode audio).
 
-MOSS 白名单格式（mp3/wav/m4a/flac/ogg/opus）均可用 PyAV 解析；
-PyAV 是 MOSS vendor 的既有依赖，无需新增安装项。
+All MOSS whitelist formats (mp3/wav/m4a/flac/ogg/opus) can be parsed with PyAV;
+PyAV is an existing dependency of the MOSS vendor, so no new install is required.
 """
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ from typing import Optional
 
 
 def probe_duration(audio_path) -> Optional[float]:
-    """返回音频时长（秒）；无法探测时返回 None（调用方回退比例进度）。
+    """Return the audio duration in seconds; None when it cannot be probed (caller falls back to ratio progress).
 
-    依次尝试：音频流 duration → 帧数/采样率 → 容器 duration。
+    Tries in order: audio stream duration → frames/sample rate → container duration.
     """
     if not audio_path:
         return None
     try:
-        import av  # 延迟导入：仅转写任务首次探测时加载
+        import av  # lazy import: only loaded on the first probe of a transcription task
 
         with av.open(str(audio_path)) as container:
             stream = next(
@@ -24,17 +24,17 @@ def probe_duration(audio_path) -> Optional[float]:
             )
             if stream is None:
                 return None
-            # 流级 duration（单位：stream.time_base，秒）
+            # Stream-level duration (unit: stream.time_base, seconds)
             if stream.duration is not None:
                 duration = float(stream.duration * stream.time_base)
                 if duration > 0:
                     return duration
-            # 帧数 / 采样率
+            # Frames / sample rate
             if stream.frames and stream.rate:
                 duration = float(stream.frames) / float(stream.rate)
                 if duration > 0:
                     return duration
-            # 容器级 duration（单位：av.time_base，微秒）
+            # Container-level duration (unit: av.time_base, microseconds)
             if container.duration is not None:
                 duration = float(container.duration / av.time_base)
                 if duration > 0:

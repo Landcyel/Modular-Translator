@@ -1,21 +1,22 @@
-"""单说话人后处理工具（MOSS 过度分离的兜底保险）。
+"""Single-speaker post-processing utilities (fallback insurance against MOSS over-segmentation).
 
-纯 Python 实现、零外部依赖：主环境与独立环境均可直接导入。
+Pure Python, zero external dependencies: importable from both the main and standalone environments.
 """
 from __future__ import annotations
 
 
 def force_single_speaker(segments, speaker: str = "S01", merge_gap: float = 0.3) -> list[dict]:
-    """把所有段落统一为单一说话人，并将时间间隔 ≤ merge_gap 秒的相邻段合并。
+    """Force all segments to a single speaker and merge adjacent segments whose gap is ≤ merge_gap seconds.
 
-    - ``segments``: ``[{"id", "start", "end", "speaker", "text"}, ...]`` 列表
-    - ``speaker``: 统一使用的说话人标签（默认 ``S01``）
-    - ``merge_gap``: 相邻段 ``start - prev.end`` 不超过该值（秒）则合并
-      （text 拼接、end 取两段较大值）
-    - 返回新列表（不改入参），按 start 排序
+    - ``segments``: a list of ``[{"id", "start", "end", "speaker", "text"}, ...]``
+    - ``speaker``: the speaker label to use for all (default ``S01``)
+    - ``merge_gap``: adjacent segments are merged when ``start - prev.end`` ≤ this value
+      (seconds) (text concatenated, end takes the larger of the two)
+    - Returns a new list (input unchanged), sorted by start
 
-    与 MOSS 服务端 ``single_speaker`` 提示词配合形成"双保险"：提示词在模型
-    生成侧抑制说话人分裂，本函数在结果侧兜底归一化。
+    Works with the MOSS server-side ``single_speaker`` prompt as a "double insurance":
+    the prompt suppresses speaker splitting at generation time, while this function
+    normalizes on the result side as a fallback.
     """
     segs = [
         {**s, "speaker": speaker}

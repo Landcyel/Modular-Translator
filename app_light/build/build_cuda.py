@@ -1,17 +1,19 @@
-"""Modular Translator CUDA 版打包脚本（PyInstaller onedir 绿色目录）。
+"""Modular Translator CUDA packaging script (PyInstaller onedir portable directory).
 
-必须使用项目 .venv 的 Python 运行（解释器锁定，防止全局 Python 混入旧版依赖）：
+Must run with the project .venv's Python (interpreter pinning prevents a global
+Python from mixing in old dependencies):
 
-  .venv\\Scripts\\python.exe build/build_cuda.py                  # 默认输出 D:\\ModularTranslator_cuda
+  .venv\\Scripts\\python.exe build/build_cuda.py                  # default output D:\\ModularTranslator_cuda
   .venv\\Scripts\\python.exe build/build_cuda.py --verify --smoke
-  .venv\\Scripts\\python.exe build/build_cuda.py --with-cpu-fallback   # 额外带回 torch-cpu 回退
-  .venv\\Scripts\\python.exe build/build_cuda.py --with-whisper-cuda  # 额外打入 fasterwisper-cuda DLL
+  .venv\\Scripts\\python.exe build/build_cuda.py --with-cpu-fallback   # also bundles the torch-cpu fallback
+  .venv\\Scripts\\python.exe build/build_cuda.py --with-whisper-cuda  # also bundles fasterwisper-cuda DLLs
 
-CUDA 版内容：torch-cuda 运行时（默认唯一 torch 槽位，无 GPU 时自动降级为 CPU
-模式运行，见 app/torch_runtime.py）+ llama-release 完整版（CPU+CUDA）；
-fasterwisper-cuda（约 1.3GB）默认外置，--with-whisper-cuda 可选打入；
---with-cpu-fallback 可额外打入 torch-cpu 回退（+504MB，无 GPU 时优先使用）。
-模型与角色资产外置（由 tools/make_model_volumes.py 制作分卷）。
+CUDA build contents: torch-cuda runtime (the only torch slot by default, auto-
+degrading to CPU mode without a GPU, see app/torch_runtime.py) + full llama-release
+(CPU+CUDA); fasterwisper-cuda (~1.3GB) stays external by default, optionally
+bundled via --with-whisper-cuda; --with-cpu-fallback optionally bundles the
+torch-cpu fallback (+504MB, preferred when no GPU). Models and character assets
+stay external (multi-volume archives made by tools/make_model_volumes.py).
 """
 
 import argparse

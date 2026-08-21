@@ -1,33 +1,40 @@
-"""MOSS 进程内转写执行器（直调 ModelRunner，token 级进度/取消 + 实时段预览）。
+"""In-process MOSS transcription executor (calls ModelRunner directly, token-level progress/cancel + live segment preview).
 
-MOSS 库（``moss_transcribe_diarize`` + ``transformers>=5.6``）随主环境安装；
-本类仿 ``core.executor.Transcriber`` 的契约，进度回调四参语义与
-``TranscriptionTaskQueue`` 对齐（pos/total/speed/segs）。
+The MOSS libraries (``moss_transcribe_diarize`` + ``transformers>=5.6``) are installed with the main environment;
+this class follows the ``core.executor.Transcriber`` contract, and the four-arg progress
+callback semantics align with ``TranscriptionTaskQueue`` (pos/total/speed/segs).
 
-``StreamingModelRunner``（SUPPORTS_PARTIAL_TEXT）可用时，pos/total 为
-音频时间轴秒数、segs 为运行中已确认的字幕段——与 Whisper 的进度条与
-预览逻辑完全一致；老版 runner 回退 token 比例语义（unit=ratio）。
+When ``StreamingModelRunner`` (SUPPORTS_PARTIAL_TEXT) is available, pos/total are
+audio-timeline seconds and segs are confirmed subtitle segments in progress — fully
+consistent with Whisper's progress bar and preview logic; older runners fall back
+to token-ratio semantics (unit=ratio).
 
-长音频保护（CUDA OOM）：MOSS 的 Qwen3 解码器把整段音频的全部
-audio-token 一次性塞进序列做全注意力（12.5 token/s），20 分钟音频
-≈ 1.6 万 token，仅注意力分数张量就 ≈ 15 GiB，6 GB 显卡必然 OOM。
-切块方案（三层保障，详见 PLANS/gsv-moss/plan-moss-long-audio-chunking.md）：
+Long-audio protection (CUDA OOM): MOSS's Qwen3 decoder stuffs all audio tokens of a
+whole clip into the sequence at once with full attention (12.5 token/s), so 20 minutes
+of audio ≈ 16k tokens and the attention-score tensor alone ≈ 15 GiB — a 6 GB GPU will
+definitely OOM. Chunking scheme (three layers of protection; see
+PLANS/gsv-moss/plan-moss-long-audio-chunking.md for details):
 
-1. **显存预算窗口**（``vram_auto_fit``）：按空闲显存解二次峰值模型
-   ``峰值 ≈ W + C1·t + C2·t²`` 反推单窗安全时长，钳制在
-   ``[min_window_sec, max_audio_sec]``——显存大的卡自动放宽窗口、
-   小的卡自动收敛，无需手工调参；``max_audio_sec`` 为硬上限。
-2. **静音感知边界**（``silence_boundary``）：每个候选切点在
-   ``[target−boundary_lookback_sec, target]`` 带内选最长静音段
-   （能量包络，默认 0.35s 静音起判），切点落在自然停顿上，不截断
-   正常说话；带内无静音则退回算术硬切并打 hard 标记。窗口只缩不长，
-   单窗时长硬性 ≤ 显存预算值。
-3. **边界文本修复 + 运行时 OOM 退避**：硬切边界处被截断的句尾段与
-   下一窗口续接的句头段按文本相似度配对缝合为完整段；单窗转写仍
-   OOM 时自动缩窗（×0.7，下限 45s）重规划剩余音频并重试。
+1. **VRAM-budget window** (``vram_auto_fit``): solve the quadratic peak model
+   ``peak ≈ W + C1·t + C2·t²`` against free VRAM to derive a safe single-window
+   duration, clamped to ``[min_window_sec, max_audio_sec]`` — large-VRAM cards
+   automatically widen the window, small ones shrink it, no manual tuning;
+   ``max_audio_sec`` is the hard cap.
+2. **Silence-aware boundary** (``silence_boundary``): within each candidate cut
+   band ``[target−boundary_lookback_sec, target]``, pick the longest silence run
+   (energy envelope, silence judged from 0.35s by default), so cuts land on natural
+   pauses and never truncate normal speech; if the band has no silence, fall back
+   to an arithmetic hard cut flagged as hard. Windows only shrink, never grow, and
+   single-window duration is strictly ≤ the VRAM-budget value.
+3. **Boundary text repair + runtime OOM retreat**: tail segments truncated at hard
+   cuts are paired by text similarity with continuing head segments of the next
+   window and stitched into complete segments; if a single-window transcription
+   still OOMs, shrink the window (×0.7, floor 45s), replan the remaining audio,
+   and retry.
 
-各窗口段打回全局时间轴后去重合并；每窗口 ``max_new_tokens`` 同时按
-窗口时长收敛，防止失控生成。
+After mapping per-window segments back to the global timeline, they are deduplicated
+and merged; per-window ``max_new_tokens`` also converges with window duration to
+prevent runaway generation.
 """
 from __future__ import annotations
 
@@ -47,30 +54,30 @@ from .audio_utils import probe_duration
 from .silence_probe import find_silence_cut, load_band_rms
 from .speaker_utils import force_single_speaker
 
-# 长音频分窗默认值：180s 窗口（约 2340 个 decoder token）在 6 GB 显卡上
-# 注意力峰值 ≈ 350 MB，留足模型权重/KV/激活余量；重叠 10s 用于边界续接。
+# Long-audio window defaults: a 180s window (~2340 decoder tokens) on a 6 GB GPU
+# has an attention peak ≈ 350 MB, leaving ample room for model weights/KV/activations; 10s overlap for boundary continuation.
 DEFAULT_WINDOW_SEC = 180.0
 DEFAULT_OVERLAP_SEC = 10.0
-# 每窗口生成预算：16 token/s（日/中密集语音 + 时间戳/说话人开销的宽松上限）
+# Per-window generation budget: 16 token/s (generous upper bound for dense JA/ZH speech + timestamp/speaker overhead)
 _WINDOW_TOKEN_RATE = 16
 
-# ── 显存预算常量（bf16，Qwen3 28 层全注意力，约 13 token/s）────────
-# 峰值模型：peak(t) ≈ W + C1·t + C2·t²（t = 窗口秒数）
+# ── VRAM budget constants (bf16, Qwen3 28-layer full attention, ~13 token/s) ──
+# Peak model: peak(t) ≈ W + C1·t + C2·t² (t = window seconds)
 #   C2 = 64.5 B/token² × (13 token/s)² ≈ 10900 B/s²
-#        （注意力分数/softmax/掩码等二次瞬时分配，跨层经分配器累积）
-#   C1 = 114688 B/token × 13 token/s ≈ 1.49 MB/s（KV 缓存线性项）
-# 校准锚点：1217s → 峰值 ≈ 15.4 GiB（6 GB 卡 OOM）；180s → ≈ 620 MB。
+#        (quadratic transient allocations: attention scores/softmax/masks, accumulated across layers by the allocator)
+#   C1 = 114688 B/token × 13 token/s ≈ 1.49 MB/s (KV-cache linear term)
+# Calibration anchors: 1217s → peak ≈ 15.4 GiB (OOM on a 6 GB card); 180s → ≈ 620 MB.
 _ATTN_BYTES_PER_SEC2 = 10900.0
 _KV_BYTES_PER_SEC = 1_490_000.0
-_WEIGHTS_ESTIMATE_BYTES = 1_365_000_000  # 懒加载未就绪时的权重估算（Qwen3-0.6B bf16 + 编码器）
-_FIXED_SLACK_BYTES = 512 * 1024 * 1024   # mel 特征/输出 logits/分配器碎片等固定开销
+_WEIGHTS_ESTIMATE_BYTES = 1_365_000_000  # weight estimate when lazy load is not ready (Qwen3-0.6B bf16 + encoder)
+_FIXED_SLACK_BYTES = 512 * 1024 * 1024   # fixed overhead: mel features/output logits/allocator fragmentation, etc.
 _DEFAULT_MIN_WINDOW_SEC = 60.0
-# OOM 退避：缩窗系数 / 单窗下限 / 最大退避次数
+# OOM retreat: window shrink factor / single-window floor / max retreats
 _OOM_SHRINK = 0.7
 _OOM_FLOOR_SEC = 45.0
 _OOM_MAX_RETREATS = 3
-# 硬切边界修复容差（秒）：段尾距切点 1.2s 内视为可能被截断，
-# 段头在切点后 0.5s 内视为切点处续接。
+# Hard-cut boundary repair tolerance (seconds): a tail within 1.2s of the cut is
+# considered possibly truncated; a head within 0.5s after the cut is a continuation at the cut.
 _HARD_CUT_TAIL_TOL = 1.2
 _HARD_CUT_HEAD_TOL = 0.5
 
@@ -83,24 +90,24 @@ class MossTranscriber(Executor):
         tx = MossTranscriber(runner, defaults=config)
         # TaskQueue calls tx.execute(task, progress_callback, cancel_event)
 
-    参数分四类（``defaults`` 为服务级参数，任务级 ``configs["args"]`` 覆盖之）：
-    - 服务参数（configs/models/moss/default.json）：model_path / device / dtype（加载时生效）
-    - 转写参数：max_new_tokens / max_len / decoding / temperature / top_p /
-      top_k / single_speaker（temperature/top_p/top_k 仅 decoding="sample" 时生效）
-    - 长音频分窗：max_audio_sec（单窗硬上限）/ overlap_sec / vram_auto_fit /
+    Parameters fall into four groups (``defaults`` are service-level; task-level ``configs["args"]`` override them):
+    - Service params (configs/models/moss/default.json): model_path / device / dtype (effective at load time)
+    - Transcription params: max_new_tokens / max_len / decoding / temperature / top_p /
+      top_k / single_speaker (temperature/top_p/top_k only take effect when decoding="sample")
+    - Long-audio chunking: max_audio_sec (hard per-window cap) / overlap_sec / vram_auto_fit /
       vram_safety_ratio / min_window_sec / silence_boundary /
-      silence_min_sec / boundary_lookback_sec（见模块 docstring）
-    - prompt：转写提示词（服务默认，任务 args 可覆盖）
-    - hotwords：任务级 ``configs["hotwords"]``（configs/transcribe/hotwords/*.json），
-      按官方配方附加到提示词末尾（"热词提示：词1, 词2…"）
+      silence_min_sec / boundary_lookback_sec (see the module docstring)
+    - prompt: transcription prompt (service default, overridable by task args)
+    - hotwords: task-level ``configs["hotwords"]`` (configs/transcribe/hotwords/*.json),
+      appended to the prompt per the official recipe ("热词提示：词1, 词2…")
     """
 
     def __init__(self, runner, defaults: Optional[dict] = None,
                  on_first_load: Optional[Callable[[Optional[str], Optional[str]], None]] = None):
         self.runner = runner
         self.defaults = defaults or {}
-        self.on_first_load = on_first_load  # 首次转写（模型实际加载）后回调(device, dtype)
-        self._device_logged = False   # 首次转写完成后补记真实设备（ModelRunner 懒加载）
+        self.on_first_load = on_first_load  # callback(device, dtype) after the first transcription (model actually loaded)
+        self._device_logged = False   # backfill the real device after the first transcription (ModelRunner lazy load)
 
     def execute(
         self,
@@ -110,19 +117,19 @@ class MossTranscriber(Executor):
     ) -> dict:
         """Run transcription from *task*.
 
-        Task 契约::
-            task.file_path             音频文件路径
-            task.configs["args"]       转写参数（max_new_tokens/max_len/decoding…，
-                                        路径 → JSON dict，覆盖服务 defaults）
+        Task contract::
+            task.file_path             audio file path
+            task.configs["args"]       transcription params (max_new_tokens/max_len/decoding…,
+                                       path → JSON dict, overriding service defaults)
 
         Returns {"segments": [...], "info": TranscriptionResult.to_dict()}.
 
-        进度回调与 Whisper ``Transcriber`` 统一为
-        ``(pos, total, speed, payload)``：pos/total 为音频时间轴秒数，
-        pos 为最新已确认段尾（与 Whisper 的 ``seg.end`` 同义，首段前为 0），
-        完成时补发一次 pos=total 使进度满格；payload 携带
-        status/generated_tokens 与运行中已确认的 segments
-        （仅 ``SUPPORTS_PARTIAL_TEXT`` 的 runner 提供）。
+        Progress callbacks unify with the Whisper ``Transcriber`` as
+        ``(pos, total, speed, payload)``: pos/total are audio-timeline seconds,
+        pos is the end of the latest confirmed segment (same as Whisper's ``seg.end``,
+        0 before the first segment), and one final pos=total is emitted at completion to
+        fill the bar; payload carries status/generated_tokens and the confirmed in-progress
+        segments (only provided by ``SUPPORTS_PARTIAL_TEXT`` runners).
         """
         cfg = self._resolve_task(task)
         args = cfg.get("transcribe_config") or {}
@@ -133,12 +140,12 @@ class MossTranscriber(Executor):
         total_sec = probe_duration(audio_path)
         started = time.time()
         state = {
-            "stage": 0.0,          # 比例进度回退值（时长探测失败时使用）
-            "tokens": 0,           # 当前窗口生成 token 数
-            "tokens_base": 0,      # 已完成窗口的 token 累计（分窗模式）
-            "pos_base": 0.0,       # 当前窗口在全局时间轴上的起点
-            "pos_floor": 0.0,      # 已发射进度的单调下界（分窗切换防回退）
-            "gen_started": None,   # 解码开始时刻（首个生成 token）
+            "stage": 0.0,          # ratio-progress fallback value (used when duration probing fails)
+            "tokens": 0,           # tokens generated by the current window
+            "tokens_base": 0,      # token accumulation across completed windows (chunked mode)
+            "pos_base": 0.0,       # start of the current window on the global timeline
+            "pos_floor": 0.0,      # monotonic lower bound of emitted progress (prevents rollback across windows)
+            "gen_started": None,   # decode start time (first generated token)
         }
 
         def _check_cancel():
@@ -149,12 +156,13 @@ class MossTranscriber(Executor):
 
         def _emit(status: str, stage_progress: float, generated_tokens: int,
                   partial_text: Optional[str] = None):
-            """统一进度发射：取消/暂停检查点 + Whisper 同构四参回调。
+            """Unified progress emission: cancel/pause checkpoints + Whisper-isomorphic four-arg callback.
 
-            token 级进度更新已删除（进度只由已确认段驱动）：无已确认段且
-            transcribing 状态一律不发回调，避免把已推进的进度打回 0% 造成
-            闪烁；loading_model 等加载里程碑保留 pos=当前窗口起点（加载期
-            进度本为 0）。
+            Token-level progress updates are removed (progress is driven only by confirmed
+            segments): with no confirmed segments and status transcribing, no callback is
+            sent, avoiding flicker from pushing advanced progress back to 0%; load
+            milestones such as loading_model keep pos=current window start (load-phase
+            progress is inherently 0).
             """
             _check_cancel()
             state["stage"] = float(stage_progress or 0.0)
@@ -162,8 +170,8 @@ class MossTranscriber(Executor):
                 state["tokens"] = int(generated_tokens)
             tokens_total = int(state.get("tokens_base") or 0) + int(state["tokens"] or 0)
             if state["tokens"] > 0 and state["gen_started"] is None:
-                # 与 Whisper 的 start_wall 对齐：倍速自解码开始（首个生成
-                # token）起计，排除模型懒加载耗时。
+                # Aligned with Whisper's start_wall: speed is measured from decode start
+                # (first generated token), excluding lazy model-load time.
                 state["gen_started"] = time.time()
             if progress_callback is None:
                 return
@@ -186,30 +194,30 @@ class MossTranscriber(Executor):
                 payload["segments"] = segments
             if total_sec:
                 if segments:
-                    # 与 Whisper 同构：pos = 最新已确认段尾（真实时间轴），
-                    # 倍速自解码开始起计，与 Whisper pos/elapsed 口径一致。
+                    # Whisper-isomorphic: pos = end of the latest confirmed segment (real timeline),
+                    # speed measured from decode start, consistent with Whisper's pos/elapsed semantics.
                     pos = max(float(s["end"]) for s in segments)
                     speed = None
                     if state["gen_started"] is not None:
                         speed = pos / max(now - state["gen_started"], 1e-6)
                     progress_callback(pos, total_sec, speed, payload)
                 elif status != "transcribing":
-                    # 加载期里程碑（loading_model 等）：进度保持在当前窗口
-                    # 起点之上，仅刷新 status 文本（加载期无正常进度，不闪烁）。
+                    # Load-phase milestones (loading_model, etc.): progress stays at the current
+                    # window start, only the status text refreshes (no real progress during load, no flicker).
                     pos = max(
                         float(state.get("pos_base") or 0.0),
                         float(state.get("pos_floor") or 0.0),
                     )
                     progress_callback(pos, total_sec, None, payload)
-                # 无已确认段且 transcribing：不发（token 级进度已删除；加载
-                # 里程碑与偶发段解析失败均不再把进度打回 0%）
+                # No confirmed segments and transcribing: emit nothing (token-level progress is
+                # gone; load milestones and occasional segment-parse failures no longer push progress back to 0%)
             else:
-                # 时长探测失败：回退 token 比例语义（unit=ratio 供 UI 区分）
+                # Duration probe failed: fall back to token-ratio semantics (unit=ratio lets the UI distinguish)
                 payload["unit"] = "ratio"
                 progress_callback(state["stage"], 1.0, None, payload)
 
         def _emit_window_end(window_end: float):
-            """分窗模式下每个窗口完成后补发一次进度（单调推进到窗口尾）。"""
+            """In chunked mode, emit one more progress event after each window completes (monotonically advancing to the window end)."""
             _check_cancel()
             if progress_callback is None:
                 return
@@ -233,9 +241,9 @@ class MossTranscriber(Executor):
                 progress_callback(1.0, 1.0, None, payload)
 
         def _emit_final(seg_dicts: list, generated_total: int):
-            """收尾进度：与 Whisper 末段 end≈duration 对齐，进度补满 100%。
+            """Final progress: aligned with Whisper's last-segment end≈duration, progress topped at 100%.
 
-            队列在 execute 返回后才翻转 status，故完成瞬间进度条可见满格。
+            The queue flips status only after execute() returns, so the bar is visible at full at the moment of completion.
             """
             _check_cancel()
             if progress_callback is None:
@@ -304,10 +312,10 @@ class MossTranscriber(Executor):
             try:
                 result = self.runner.transcribe(audio_path, **transcribe_kwargs)
             except CancelledError:
-                self._empty_cuda_cache()  # 取消后释放 allocator 缓存
+                self._empty_cuda_cache()  # release the allocator cache after cancellation
                 raise
             self._note_first_load(started)
-            # 最终结果与实时预览共用同一段切分管线，保证预览末帧 = 最终结果。
+            # Final result and live preview share the same segmentation pipeline, so the preview's last frame = the final result.
             seg_dicts = self._segments_from_text(result.text, merged)
             info = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
             if not isinstance(info, dict):
@@ -319,17 +327,17 @@ class MossTranscriber(Executor):
         _emit_final(seg_dicts, generated_total)
         return {"segments": seg_dicts, "info": info}
 
-    # ── 长音频分窗 ─────────────────────────────────────────────
+    # ── Long-Audio Chunking ──
 
     def _resolve_window_sec(self, merged: dict) -> Optional[float]:
-        """显存预算 → 单窗安全时长（秒）；None/≤0 = 禁用分窗。
+        """VRAM budget → safe single-window duration (seconds); None/≤0 disables chunking.
 
-        ``vram_auto_fit=false``、非 CUDA 设备或探测失败时回落
-        ``max_audio_sec``（既有固定窗口行为）。CUDA 下按二次峰值模型
-        ``C2·t² + C1·t = 预算`` 反推时长（预算 = 空闲显存 ×
-        ``vram_safety_ratio`` − 固定开销 − 权重估算，模型已加载时
-        权重已在空闲显存中扣除、不再重复扣减），结果钳制在
-        ``[min_window_sec, max_audio_sec]``。
+        With ``vram_auto_fit=false``, a non-CUDA device, or a probe failure, fall back to
+        ``max_audio_sec`` (existing fixed-window behavior). On CUDA, solve the quadratic
+        peak model ``C2·t² + C1·t = budget`` for the duration (budget = free VRAM ×
+        ``vram_safety_ratio`` − fixed overhead − weight estimate; when the model is already
+        loaded the weights are already deducted from free VRAM and not subtracted again),
+        clamping the result to ``[min_window_sec, max_audio_sec]``.
         """
         max_sec = self._as_float(merged.get("max_audio_sec"), DEFAULT_WINDOW_SEC)
         if max_sec <= 0:
@@ -342,19 +350,20 @@ class MossTranscriber(Executor):
         ratio = self._as_float(merged.get("vram_safety_ratio"), 0.7)
         ratio = max(0.1, min(ratio, 0.95))
         budget = free * ratio - _FIXED_SLACK_BYTES
-        # 最低预算保障（GB，0=不设下限）：显存较小时也按指定预算选窗，
-        # 优先把窗口开大（宁可触发 OOM 缩窗兜底，也不让窗口过小）
+        # Minimum budget guarantee (GB, 0 = no floor): with small VRAM still pick the
+        # window by the given budget, preferring a larger window (better to trigger the
+        # OOM shrink fallback than make the window too small)
         min_gb = self._as_float(merged.get("min_vram_budget_gb"), 0.0)
         if min_gb > 0:
             budget = max(budget, int(min_gb * 1024 ** 3))
         if getattr(self.runner, "_model", None) is None:
-            budget -= _WEIGHTS_ESTIMATE_BYTES  # 懒加载：空闲显存尚未扣除权重
+            budget -= _WEIGHTS_ESTIMATE_BYTES  # lazy load: weights not yet deducted from free VRAM
         min_sec = min(
             self._as_float(merged.get("min_window_sec"), _DEFAULT_MIN_WINDOW_SEC),
             max_sec,
         )
         if budget <= 0:
-            return max(min_sec, 1.0)  # 预算极低：保底最小窗，交给 OOM 退避兜底
+            return max(min_sec, 1.0)  # extremely low budget: use the minimum window and let the OOM retreat handle it
         import math
 
         disc = _KV_BYTES_PER_SEC ** 2 + 4.0 * _ATTN_BYTES_PER_SEC2 * budget
@@ -362,7 +371,7 @@ class MossTranscriber(Executor):
         return max(min(sec, max_sec), min_sec)
 
     def _probe_free_vram(self, merged: dict) -> Optional[int]:
-        """CUDA 空闲显存探测（字节）；非 CUDA 配置 / 探测失败返回 None。"""
+        """Probe free CUDA VRAM (bytes); None for non-CUDA configs / probe failures."""
         device_cfg = str(merged.get("device") or "auto").lower()
         if device_cfg == "cpu":
             return None
@@ -391,27 +400,29 @@ class MossTranscriber(Executor):
             return None
 
     def _plan_windows(self, total_sec: Optional[float], merged: dict) -> list:
-        """兼容入口：超过 max_audio_sec 的音频 → 算术滑动窗口（无静音探测）。
+        """Compatibility entry: audio exceeding max_audio_sec → arithmetic sliding windows (no silence probing).
 
-        相邻窗口重叠 overlap_sec；总长未超阈值 / 时长未知 / 阈值为 0 时
-        返回空列表（调用方走单次整段转写路径）。
+        Adjacent windows overlap by overlap_sec; returns an empty list when the total
+        length is within the threshold / duration is unknown / threshold is 0 (caller
+        takes the single full-clip transcription path).
         """
         return self._plan_windows_with_flags(total_sec, merged)[0]
 
     def _plan_windows_with_flags(self, total_sec: Optional[float], merged: dict,
                                  envelope_getter=None, window_sec: Optional[float] = None,
                                  start_from: float = 0.0) -> tuple[list, list]:
-        """静音感知滑动窗口 → ([(start, end), ...], [hard_flag, ...])。
+        """Silence-aware sliding window → ([(start, end), ...], [hard_flag, ...]).
 
-        单窗长度 = ``window_sec``（显存预算值）或 ``max_audio_sec``。
-        每个内部边界在 ``[target − lookback, target]`` 带内（target =
-        窗首 + 窗长）寻找最佳静音段作为切点：切点只可能提前、不会推后，
-        **单窗时长硬性 ≤ 预算值**（显存安全的构造性保证）。带内无静音
-        → 算术硬切（flag=True，交由边界文本修复兜底）。
+        Single-window length = ``window_sec`` (the VRAM-budget value) or ``max_audio_sec``.
+        Each internal boundary looks for the best silence segment as the cut within the
+        ``[target − lookback, target]`` band (target = window start + window length): cuts
+        can only move earlier, never later — **single-window duration is strictly ≤ the
+        budget value** (a constructive VRAM-safety guarantee). No silence in the band →
+        arithmetic hard cut (flag=True, left to the boundary text repair fallback).
 
-        ``start_from`` 用于 OOM 退避时从失败窗口起重规划剩余音频；
-        hard_flag 与窗口对齐：flag[i] = 窗口 i 右边界是否为硬切
-        （末窗口恒为 False）。
+        ``start_from`` replans the remaining audio starting from a failed window during OOM retreat;
+        hard_flag aligns with windows: flag[i] = whether window i's right boundary is a hard cut
+        (the last window is always False).
         """
         max_sec = (
             window_sec
@@ -460,7 +471,7 @@ class MossTranscriber(Executor):
 
     @staticmethod
     def _load_band(getter, lo: float, hi: float):
-        """容错调用包络取数器（任何异常 → None，回退硬切）。"""
+        """Fault-tolerant envelope getter call (any exception → None, falls back to a hard cut)."""
         try:
             return getter(float(lo), float(hi))
         except Exception:
@@ -475,9 +486,9 @@ class MossTranscriber(Executor):
 
     def _make_window_clip(self, audio_path, task, idx: int,
                           start: float, end: float) -> Path:
-        """ffmpeg 切出窗口级 16kHz 单声道 WAV（供模型窗口内解码）。
+        """Use ffmpeg to cut a window-level 16kHz mono WAV (for in-window model decoding).
 
-        输出到项目 temp 目录（任务 id 命名），整个任务结束后由调用方清理。
+        Output goes to the project temp dir (named by task id) and is cleaned up by the caller after the whole task.
         """
         from app.ffmpeg import run_ffmpeg
 
@@ -509,10 +520,10 @@ class MossTranscriber(Executor):
         return out
 
     def _window_max_new_tokens(self, base, window_sec: float) -> int:
-        """窗口级生成预算：与用户上限取小者，避免整段预算失控生成。
+        """Per-window generation budget: the smaller of this and the user cap, to avoid runaway generation with the whole-clip budget.
 
-        默认整段预算 65536 是为超长音频准备的；分窗后每窗最多
-        16 token/s 已覆盖密集语音 + 时间戳/说话人开销。
+        The default whole-clip budget of 65536 is meant for very long audio; after chunking,
+        16 token/s per window already covers dense speech + timestamp/speaker overhead.
         """
         budget = max(1024, int(float(window_sec) * _WINDOW_TOKEN_RATE) + 256)
         try:
@@ -527,16 +538,18 @@ class MossTranscriber(Executor):
                              total_sec, merged, base_kwargs, state, started,
                              check_cancel, emit_window_end, envelope_getter=None,
                              window_sec=None) -> tuple[list, dict]:
-        """逐窗转写 → 时间轴平移 → 硬切修复 + 去重合并 → 合成 info。
+        """Transcribe window by window → shift to timeline → hard-cut repair + dedup merge → combined info.
 
-        流水线（GPU 优化方案 A）：后台线程并行执行窗口的切窗 + 解码/mel/
-        tokenize（``prepare_clip``，无模型锁），主线程执行 ``generate_with``
-        （持模型锁）——窗口 i 的推理与窗口 i+1 的输入准备重叠，消除
-        ffmpeg 切片/特征提取等 CPU 开销造成的 GPU 空闲期。
+        Pipeline (GPU optimization plan A): a background thread runs window cutting + decode/mel/
+        tokenize in parallel (``prepare_clip``, no model lock), while the main thread runs
+        ``generate_with`` (holds the model lock) — window i's inference overlaps with window
+        i+1's input preparation, eliminating GPU idle periods caused by CPU overhead such as
+        ffmpeg cutting / feature extraction.
 
-        运行时 OOM 退避：单窗仍超出显存时，缩窗 ×0.7（下限 45s）
-        重规划**剩余**音频（已完成窗口保留），重建预取队列与线程后重试，
-        最多 3 次；退避耗尽后抛出带指引的错误。
+        Runtime OOM retreat: when a single window still exceeds VRAM, shrink the window ×0.7
+        (floor 45s), replan the **remaining** audio (completed windows are kept), rebuild the
+        prefetch queue and thread, then retry, up to 3 times; when retreats are exhausted, raise
+        an error with guidance.
         """
         import queue as _queue
         import threading
@@ -549,16 +562,16 @@ class MossTranscriber(Executor):
         ))
         retreats = 0
         stop_event = threading.Event()
-        ready = _queue.Queue(maxsize=2)  # 最多预取 2 个窗口
+        ready = _queue.Queue(maxsize=2)  # prefetch at most 2 windows
 
         prepare_prompt = base_kwargs.get("prompt")
         prepare_max_length = int(base_kwargs.get("max_length", 131072))
 
         def _prepare_worker(window_list: list, start_idx: int) -> None:
-            """后台线程：切窗 + prepare_clip（无模型锁），与主线程 generate 并行。
+            """Background thread: window cutting + prepare_clip (no model lock), parallel with the main thread's generate.
 
-            队列满时以超时循环等待（0.2s 轮询 stop_event），取消后能退出，
-            不会因阻塞在 put 而永久持有 GPU 输入张量。
+            When the queue is full, wait in a timeout loop (0.2s polling stop_event) so
+            cancellation can exit; never block on put and hold GPU input tensors forever.
             """
             for widx in range(start_idx, len(window_list)):
                 if stop_event.is_set():
@@ -596,7 +609,7 @@ class MossTranscriber(Executor):
                 check_cancel()
                 widx, inputs, prompt_len, clip = ready.get()
                 if inputs is None:
-                    raise prompt_len  # 上游 prepare 失败，payload 为异常对象
+                    raise prompt_len  # upstream prepare failed; the payload is the exception object
                 if clip_dir is None:
                     clip_dir = clip.parent
                 start, end = windows[idx]
@@ -620,7 +633,7 @@ class MossTranscriber(Executor):
                     )
                 except Exception as exc:
                     if isinstance(exc, CancelledError):
-                        raise  # 任务取消不是转写失败，不记 error
+                        raise  # task cancellation is not a transcription failure; do not log an error
                     if "out of memory" not in str(exc).lower():
                         self._log(
                             "error",
@@ -628,7 +641,7 @@ class MossTranscriber(Executor):
                             f"（{float(start):.1f}-{float(end):.1f}s）: {exc}",
                         )
                         raise
-                    # ── 运行时 OOM 退避：停预取、缩窗重规划、重建队列与线程 ──
+                    # ── Runtime OOM retreat: stop prefetch, shrink and replan, rebuild queue and thread ──
                     retreats += 1
                     if retreats > _OOM_MAX_RETREATS or effective_sec <= _OOM_FLOOR_SEC + 1e-3:
                         self._log(
@@ -655,15 +668,15 @@ class MossTranscriber(Executor):
                     )
                     windows = windows[:idx] + tail
                     hard_flags = hard_flags[:idx] + tail_flags
-                    ready = _queue.Queue(maxsize=2)  # 丢弃旧预取，重建队列
-                    _start_worker(windows, idx)      # 从当前窗口重启预取
+                    ready = _queue.Queue(maxsize=2)  # drop old prefetch, rebuild the queue
+                    _start_worker(windows, idx)      # restart prefetch from the current window
                     continue
                 self._note_first_load(started)
                 text = getattr(result, "text", "")
                 info = result.to_dict() if hasattr(result, "to_dict") else dict(result or {})
                 if not isinstance(info, dict):
                     info = {}
-                # 窗口内先不做单说话人合并（跨窗口边界由最终合并统一处理）
+                # No single-speaker merge inside a window (cross-window boundaries are handled by the final merge)
                 segs = self._segments_from_text(
                     text, merged, offset=float(start), apply_single=False,
                 )
@@ -685,8 +698,8 @@ class MossTranscriber(Executor):
                 window_segments, windows, merged, hard_flags=hard_flags,
             )
         finally:
-            stop_event.set()  # 停止预取线程（daemon，不阻塞退出）
-            # 排空预取队列，释放 GPU 输入张量引用（取消路径防显存泄漏）
+            stop_event.set()  # stop the prefetch thread (daemon, does not block exit)
+            # Drain the prefetch queue and release GPU input tensor references (prevents VRAM leaks on the cancel path)
             while True:
                 try:
                     _widx, _inputs, _plen, _clip = ready.get_nowait()
@@ -696,7 +709,7 @@ class MossTranscriber(Executor):
                     break
             if clip_dir is not None:
                 shutil.rmtree(clip_dir, ignore_errors=True)
-            self._empty_cuda_cache()  # 取消/OOM/正常结束统一清 allocator 缓存
+            self._empty_cuda_cache()  # clear the allocator cache uniformly on cancel/OOM/normal exit
         info = self._combine_window_info(
             audio_path, windows, infos, seg_dicts,
             hard_flags=hard_flags, window_sec=effective_sec,
@@ -705,7 +718,7 @@ class MossTranscriber(Executor):
 
     @staticmethod
     def _empty_cuda_cache():
-        """OOM 退避时清空 CUDA 分配器缓存（失败静默）。"""
+        """Clear the CUDA allocator cache during OOM retreat (failures silent)."""
         try:
             import torch
 
@@ -715,18 +728,20 @@ class MossTranscriber(Executor):
 
     def _merge_window_segments(self, window_segments: list, windows: list,
                                merged: dict, hard_flags: Optional[list] = None) -> list:
-        """窗口段合并：硬切修复 → 重叠丢弃/裁剪 → 残余重叠消解 → 归一。
+        """Window segment merge: hard-cut repair → overlap drop/trim → residual overlap resolution → normalization.
 
-        规则（与分窗策略配套）：
-        - 硬切边界先做文本修复（``_repair_boundary_cuts``）：被切点截断的
-          句尾段与下一窗口续接的句头段缝合为完整段（带 ``_repaired`` 标记，
-          跳过后续起点裁剪，保留真实起点）；
-        - 第 0 窗全保留；
-        - 第 k>0 窗：end ≤ 前一窗末尾（即完全落在重叠区）的段丢弃；
-          start < 前一窗末尾但 end 越过边界的段，start 裁剪到边界；
-        - 最终按时间轴解析残余重叠（不同窗口时间戳抖动）：先到者优先，
-          后者完全被覆盖或文本高度相似时丢弃，否则把起点裁到前段末尾。
-        - single_speaker=true 时对合并结果统一归一（合并/排序后执行）。
+        Rules (paired with the chunking strategy):
+        - Hard-cut boundaries are text-repaired first (``_repair_boundary_cuts``): tails
+          truncated at the cut are stitched with continuing heads of the next window into
+          complete segments (marked ``_repaired``, skipping later start-trimming to keep the real start);
+        - Window 0 is fully kept;
+        - For window k>0: segments with end ≤ previous window's end (i.e. fully inside the
+          overlap) are dropped; segments with start < previous end but end crossing the
+          boundary have start trimmed to the boundary;
+        - Finally resolve residual overlaps on the timeline (timestamp jitter across windows):
+          first-come wins; a later segment fully covered or highly text-similar is dropped,
+          otherwise its start is trimmed to the previous segment's end.
+        - When single_speaker=true, normalize the merged result uniformly (after merge/sort).
         """
         if hard_flags:
             window_segments = self._repair_boundary_cuts(
@@ -756,14 +771,16 @@ class MossTranscriber(Executor):
 
     def _repair_boundary_cuts(self, window_segments: list, windows: list,
                               hard_flags: list) -> list:
-        """硬切边界文本修复：截断句尾 + 续接句头 → 缝合为完整段。
+        """Hard-cut boundary text repair: truncated tail + continuing head → stitched into a complete segment.
 
-        仅处理 hard_flag=True 的边界（切点未落在静音里，语音可能被
-        截断）。配对条件：上一窗口存在段尾距切点 ≤1.2s 的句尾段，且
-        下一窗口存在起点 ≈ 切点、终点越过切点的句头段（同一句话的
-        续接），二者文本相似度达标（截断句尾的后缀出现在句头前部，
-        或整体相似度 ≥0.5）。缝合文本经前后缀去重拼接，时间段取
-        [句尾起点, 句头终点]；句头段从下一窗口移除，避免双计。
+        Only handles boundaries with hard_flag=True (the cut did not land in silence, so
+        speech may be truncated). Pairing conditions: the previous window has a tail
+        segment whose end is within 1.2s of the cut, and the next window has a head segment
+        starting ≈ at the cut and ending past it (a continuation of the same sentence),
+        with sufficient text similarity (the truncated tail's suffix appears at the head's
+        front, or overall similarity ≥0.5). Stitched text is joined after prefix/suffix
+        dedup; the time span is [tail start, head end]; the head is removed from the next
+        window to avoid double counting.
         """
         segs = [[dict(s) for s in w] for w in window_segments]
         for k in range(min(len(windows), len(segs)) - 1):
@@ -819,17 +836,18 @@ class MossTranscriber(Executor):
         return segs
 
     def _boundary_pair_score(self, tail: dict, head: dict) -> float:
-        """截断句尾/续接句头的配对置信度（0 = 不配对）。
+        """Pairing confidence of a truncated tail / continuing head (0 = no pair).
 
-        截断句尾的末尾字符应出现在句头文本的前部（窗口只覆盖句头段
-        长度两倍的前缀）；否则退化为整体相似度 ≥0.5 才配对。
+        The tail's trailing characters should appear at the front of the head text
+        (only the prefix up to twice the head-segment length is covered by the window);
+        otherwise degrade to pairing only when overall similarity ≥0.5.
         """
         a = self._norm_text(tail.get("text", ""))
         b = self._norm_text(head.get("text", ""))
         if not a or not b:
             return 0.0
         prefix = b[: min(len(b), max(6, len(a) * 2))]
-        # 截断句尾的末尾 1-3 字符应出现在句头文本前部（截断处常为半词）
+        # The last 1-3 chars of a truncated tail should appear at the head's front (a cut often lands mid-word)
         if len(a) >= 2:
             for length in (min(3, len(a)), 2):
                 if a[-length:] in prefix:
@@ -850,7 +868,7 @@ class MossTranscriber(Executor):
 
     @staticmethod
     def _join_texts(a: str, b: str) -> str:
-        """两句文本按最长前后缀重叠去重拼接（无重叠则直接拼接）。"""
+        """Join two texts by deduping the longest prefix/suffix overlap (plain concatenation when there is no overlap)."""
         a, b = (a or "").strip(), (b or "").strip()
         if not a:
             return b
@@ -862,7 +880,7 @@ class MossTranscriber(Executor):
         return a + b
 
     def _resolve_segment_overlaps(self, segments: list) -> list:
-        """时间戳重叠消解（分窗边界专用）：先到者优先，防重复段/覆盖双计。"""
+        """Resolve timestamp overlaps (for chunk boundaries): first-come wins, preventing duplicate/covered double counting."""
         segs = [dict(s) for s in segments if s]
         segs.sort(key=lambda s: (float(s.get("start", 0.0)), float(s.get("end", 0.0))))
         resolved: list[dict] = []
@@ -880,7 +898,7 @@ class MossTranscriber(Executor):
 
     @staticmethod
     def _same_utterance(text_a, text_b) -> bool:
-        """边界去重用的文本相似判定（包含关系或高相似度）。"""
+        """Text-similarity check for boundary dedup (containment or high similarity)."""
         def _norm(text) -> str:
             return "".join(ch for ch in str(text or "") if ch.isalnum())
 
@@ -898,7 +916,7 @@ class MossTranscriber(Executor):
                              infos: list, seg_dicts: list,
                              hard_flags: Optional[list] = None,
                              window_sec: Optional[float] = None) -> dict:
-        """多窗口 TranscriptionResult.to_dict() 合成（token/耗时求和）。"""
+        """Combine multiple windows into a TranscriptionResult.to_dict() (token/elapsed sums)."""
         base = dict(infos[0]) if infos else {}
         base.update({
             "text": self._segments_to_transcript_text(seg_dicts),
@@ -919,7 +937,7 @@ class MossTranscriber(Executor):
 
     @staticmethod
     def _segments_to_transcript_text(seg_dicts: list) -> str:
-        """段 dict → 标准 LRC 转录文本（[mm:ss.cs]<说话人>正文，info.text 兼容展示）。"""
+        """Segment dicts → standard LRC transcript text ([mm:ss.cs]<speaker>body, compatible with info.text display)."""
         parts = []
         for s in seg_dicts or []:
             speaker = str(s.get("speaker") or "S01")
@@ -930,21 +948,21 @@ class MossTranscriber(Executor):
         return "\n".join(parts)
 
     def _build_transcribe_kwargs(self, merged: dict, hotwords) -> dict:
-        """按参数类别装配 runner.transcribe(**kwargs)。"""
+        """Assemble runner.transcribe(**kwargs) by parameter group."""
         decoding = merged.get("decoding", "greedy")
         transcribe_kwargs = {
             "max_length": int(merged.get("max_len", 131072)),
             "max_new_tokens": int(merged.get("max_new_tokens", 65536)),
             "decoding": decoding,
         }
-        # sampling 参数仅 sample 解码时生效（greedy 传了也会被 runner 忽略，
-        # 此处干脆不传，与 vendor CLI 行为一致）
+        # sampling params only take effect with sample decoding (greedy would ignore them
+        # anyway; simply don't pass them, matching the vendor CLI behavior)
         if decoding == "sample":
             for key, cast in (("temperature", float), ("top_p", float), ("top_k", int)):
                 value = merged.get(key)
                 if value not in (None, ""):
                     transcribe_kwargs[key] = cast(value)
-        # 热词：按官方配方附加到提示词末尾（无显式 prompt 时用 vendor 默认提示词兜底）
+        # Hotwords: append to the prompt per the official recipe (fall back to the vendor default prompt when no explicit prompt)
         prompt = merged.get("prompt")
         hotword_text = self._normalize_hotwords(hotwords)
         if hotword_text:
@@ -957,7 +975,7 @@ class MossTranscriber(Executor):
         return transcribe_kwargs
 
     def _note_first_load(self, started: float):
-        """首次转写完成后补记真实设备（ModelRunner 懒加载）。"""
+        """Backfill the real device after the first transcription completes (ModelRunner lazy load)."""
         if self._device_logged:
             return
         self._device_logged = True
@@ -972,15 +990,15 @@ class MossTranscriber(Executor):
             try:
                 self.on_first_load(device, dtype)
             except Exception:
-                pass  # 回调失败不影响转写结果
+                pass  # callback failure does not affect the transcription result
 
     def _segments_from_text(self, text: str, merged: dict,
                             offset: float = 0.0, apply_single: bool = True) -> list:
-        """原生紧凑转录 → 字幕段列表（完成结果与实时预览共用）。
+        """Native compact transcript → subtitle segment list (shared by final result and live preview).
 
-        postprocess=False 保留模型原始切分，说话人归一化交给
-        force_single_speaker 兜底；文本为空或解析失败时返回空列表。
-        ``offset`` 用于分窗段回挂全局时间轴。
+        postprocess=False keeps the model's original segmentation; speaker normalization
+        is left to the force_single_speaker fallback; returns an empty list when the text
+        is empty or parsing fails. ``offset`` maps chunked segments back to the global timeline.
         """
         if not text:
             return []
@@ -1002,7 +1020,7 @@ class MossTranscriber(Executor):
 
     @staticmethod
     def _normalize_hotwords(hotwords) -> str:
-        """热词归一为逗号串（dict {"hotwords": [...]} / list / str 均可）。"""
+        """Normalize hotwords to a comma-separated string (accepts dict {"hotwords": [...]} / list / str)."""
         if not hotwords:
             return ""
         if isinstance(hotwords, dict):
@@ -1012,8 +1030,8 @@ class MossTranscriber(Executor):
         return str(hotwords).strip()
 
     def _resolve_task(self, task):
-        """转写语义解析：file_path 作为音频路径，configs["args"] 提供参数，
-        configs["hotwords"] 提供热词（选「无」时为 None）。"""
+        """Transcription semantics: file_path as the audio path, configs["args"] providing params,
+        configs["hotwords"] providing hotwords (None when "none" is selected)."""
         _source, configs = super()._resolve_task(task)
         args = configs.get("args")
         return {

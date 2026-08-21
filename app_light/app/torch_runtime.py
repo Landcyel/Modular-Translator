@@ -1,34 +1,40 @@
-"""torch_runtime — 可插拔 PyTorch 运行时选择（CPU 基线 + dependencies/ 外挂 CUDA）。
+"""torch_runtime — pluggable PyTorch runtime selection (CPU baseline + CUDA from dependencies/).
 
-背景：PyTorch 的 CUDA 是编译进 wheel 的能力——CPU 版 torch 即使加载了 cuBLAS/cuDNN DLL，
-``torch.backends.cuda.is_built()`` 仍为 False。因此 GSV / MOSS 的 GPU 加速
-需要外挂**完整的 CUDA 版 torch 包**（``torch/ + torchaudio/``），而不是散装 DLL。
+Background: PyTorch's CUDA support is compiled into the wheel — a CPU-only torch
+returns False from ``torch.backends.cuda.is_built()`` even if cuBLAS/cuDNN DLLs
+are loaded. So GPU acceleration for GSV / MOSS requires attaching the **complete
+CUDA torch packages** (``torch/ + torchaudio/``), not loose DLLs.
 
-本模块在**任何 ``import torch`` 之前**完成三件事（APP.py 顶部最先导入）：
-1. 选择运行时目录（优先级见 :func:`setup`）；
-2. 安装一个置于 ``sys.meta_path`` 首位的自定义 finder，把 ``torch`` /
-   ``torchaudio``（及 torchgen/functorch）的导入重定向到所选目录——
-   **只劫持 torch 系包**，其余包仍走系统/venv 的正常搜索路径，避免
-   整目录插到 ``sys.path`` 头部造成的版本污染；
-3. ``os.add_dll_directory`` 注册所选目录下的 ``torch/lib`` / ``torchaudio/lib``，
-   供 .pyd 依赖解析。
+Before any ``import torch`` this module does three things (imported first at the
+top of APP.py):
+1. Choose the runtime directory (priority order in :func:`setup`);
+2. Install a custom finder placed at the head of ``sys.meta_path`` that redirects
+   imports of ``torch`` / ``torchaudio`` (and torchgen/functorch) to the chosen
+   directory — **only torch-family packages are hijacked**; other packages keep
+   the normal system/venv search path, avoiding version pollution from inserting
+   the whole directory at the head of ``sys.path``;
+3. ``os.add_dll_directory`` registers ``torch/lib`` / ``torchaudio/lib`` under
+   the chosen directory for .pyd dependency resolution.
 
-选择优先级（``TRANSLATOR_TORCH_RUNTIME=auto|cuda|cpu``，默认 auto）：
+Selection priority (``TRANSLATOR_TORCH_RUNTIME=auto|cuda|cpu``, default auto):
 - auto:
-  1. ``dependencies/runtime/torch-cuda/`` 完整 + ``cudart64_*.dll`` 探测到 GPU
-  2. ``dependencies/runtime/torch-cpu/`` 完整
-  3. ``dependencies/runtime/torch-cuda/`` 完整但**未探测到 GPU**（且无 torch-cpu
-     回退）→ 降级激活该 CUDA 槽，以 CPU 模式运行（``torch.cuda.is_available()``
-     = False，应用层自动走 CPU device）；CUDA 版打包默认只带 torch-cuda 槽
-  4. 开发模式专用回退：``dependencies/venv/Lib/site-packages``（若为 CUDA 构建
-     且探测到 GPU；当前仓库该 venv 即 cu128 环境）
-  5. 系统默认搜索路径（开发机全局 CPU torch / 根 .venv 的 CPU torch）
-- cuda / cpu：只按对应槽位强制选择；cuda 槽不完整时记录 error 并退回系统；
-  cuda 槽完整但无 GPU 时同样降级为 CPU 模式。
+  1. ``dependencies/runtime/torch-cuda/`` complete and a GPU detected via ``cudart64_*.dll``
+  2. ``dependencies/runtime/torch-cpu/`` complete
+  3. ``dependencies/runtime/torch-cuda/`` complete but **no GPU detected** (and no
+     torch-cpu fallback) → activate the CUDA slot degraded, running in CPU mode
+     (``torch.cuda.is_available()`` = False; the app layer automatically uses CPU
+     device); CUDA builds by default ship only the torch-cuda slot
+  4. Dev-mode-only fallback: ``dependencies/venv/Lib/site-packages`` (if it is a
+     CUDA build and a GPU is detected; the repo's venv is the cu128 environment)
+  5. System default search path (dev machine's global CPU torch / root .venv CPU torch)
+- cuda / cpu: force-select the corresponding slot only; an incomplete cuda slot
+  logs an error and falls back to system; a complete cuda slot without a GPU also
+  degrades to CPU mode.
 
-本模块自身**绝不 import torch**：GPU 预检通过直接 ctypes 加载所选目录的
-``cudart64_*.dll`` 并调用 ``cudaGetDeviceCount`` 完成，避免把失败的 torch
-导入留在 ``sys.modules`` 里，保证 CPU 回退是干净的新路径。
+This module itself **never imports torch**: the GPU precheck loads the chosen
+directory's ``cudart64_*.dll`` via ctypes and calls ``cudaGetDeviceCount``, so a
+failed torch import is never left in ``sys.modules``, keeping the CPU fallback a
+clean new path.
 """
 
 from __future__ import annotations
@@ -55,61 +61,65 @@ __all__ = [
 
 TORCH_RUNTIME_ENV = "TRANSLATOR_TORCH_RUNTIME"
 
-# 运行时目录（冻结与开发同基准：产物根或项目根下的 dependencies/）
+# Runtime directories (frozen and dev share the same base: dependencies/ under the
+# output or project root)
 RUNTIME_DIR = Path(project_root) / "dependencies" / "runtime"
 CUDA_SLOT = RUNTIME_DIR / "torch-cuda"
 CPU_SLOT = RUNTIME_DIR / "torch-cpu"
 
-# 开发模式专用：仓库自带 dependencies/venv（cu128 torch + GSV/MOSS 全套依赖）。
-# 冻结产物不存在该目录，不影响打包路径。
+# Dev-only: the repo's bundled dependencies/venv (cu128 torch + full GSV/MOSS deps).
+# Frozen builds do not have this directory, so the packaged path is unaffected.
 DEV_VENV_SITE = Path(project_root) / "dependencies" / "venv" / "Lib" / "site-packages"
 
-# 需要重定向到外部运行时的包（torch 的伴随包一并处理）。
+# Packages to redirect to the external runtime (torch's companion packages included).
 _REDIRECT_TOP = ("torch", "torchaudio", "torchgen", "functorch")
 
 _state: dict | None = None
 
 
 class _TorchFinder(MetaPathFinder):
-    """仅认领 torch 系包的 meta_path finder，把导入指向外部运行时目录。"""
+    """meta_path finder that only claims torch-family packages, pointing imports at the external runtime directory."""
 
     def __init__(self, root: Path):
         self.root = str(root)
 
     def find_spec(self, fullname: str, path=None, target=None):
-        # 只认领 4 个顶层包名；子模块（torch.nn…）返回 None，交给默认
-        # PathFinder 按父包 __path__（已指向外部 torch/ 目录）解析。
-        # 若对子模块也用 path=[root] 委托 PathFinder，dotted name 会按
-        # 错误基准解析（如把 torch.nn.modules.distance 解析到顶层 distance 包）。
+        # Only claim the 4 top-level package names; submodules (torch.nn…) return
+        # None and are resolved by the default PathFinder against the parent
+        # package's __path__ (already pointing at the external torch/ directory).
+        # Delegating submodules to PathFinder with path=[root] too would resolve
+        # dotted names against the wrong base (e.g. resolving
+        # torch.nn.modules.distance to a top-level distance package).
         if fullname not in _REDIRECT_TOP:
             return None
         from importlib.machinery import PathFinder
 
         return PathFinder.find_spec(fullname, path=[self.root])
 
-    def __repr__(self) -> str:  # pragma: no cover - 调试展示
+    def __repr__(self) -> str:  # pragma: no cover - debug display
         return f"<TorchRuntimeFinder root={self.root}>"
 
 
-# ---------------------------------------------------------------- 探测辅助
+# ── Detection helpers ──
 
 
 def _is_complete(root: Path) -> bool:
-    """torch 包可导入的最小完整性检查（不 import）。"""
+    """Minimal completeness check for the torch package to be importable (no import)."""
     return (root / "torch" / "__init__.py").is_file() and (
         root / "torch" / "lib"
     ).is_dir()
 
 
 def _is_cuda_build(root: Path) -> bool:
-    """CUDA 版 torch 的标志：torch/lib/torch_cuda.dll 存在。"""
+    """Marker of a CUDA torch build: torch/lib/torch_cuda.dll exists."""
     return (root / "torch" / "lib" / "torch_cuda.dll").is_file()
 
 
 def _cuda_device_count(root: Path) -> int:
-    """用所选目录的 cudart64_*.dll 预检 GPU（不 import torch）。
+    """Precheck the GPU using the chosen directory's cudart64_*.dll (no torch import).
 
-    返回可见设备数；加载失败 / 调用失败 / 0 设备均返回 0。
+    Returns the number of visible devices; load failure / call failure / 0
+    devices all return 0.
     """
     lib = root / "torch" / "lib"
     if not lib.is_dir():
@@ -130,11 +140,11 @@ def _cuda_device_count(root: Path) -> int:
 
 
 def _activate(root: Path, label: str) -> str:
-    """安装外部运行时：meta_path finder + DLL 目录。返回归一化 kind。"""
+    """Install the external runtime: meta_path finder + DLL directories. Returns the normalized kind."""
     global _state
     kind = "cuda" if _is_cuda_build(root) else "cpu"
     finder = _TorchFinder(root)
-    # 防重复激活（幂等重入时先移除旧 finder）
+    # Prevent duplicate activation (remove the old finder first on idempotent re-entry)
     for mf in list(sys.meta_path):
         if isinstance(mf, _TorchFinder):
             sys.meta_path.remove(mf)
@@ -150,20 +160,20 @@ def _activate(root: Path, label: str) -> str:
 
 
 def _select(forced: str) -> tuple[str, Path | None, str]:
-    """按优先级选出 (kind, root, label)；未选中时 kind='system'。
+    """Select (kind, root, label) by priority; kind='system' when nothing is selected.
 
-    auto 优先级：GPU 可用的 torch-cuda > torch-cpu 槽 > 无 GPU 的 torch-cuda
-    降级（仅当无 torch-cpu 槽，以 CPU 模式激活）。
+    auto priority: GPU-capable torch-cuda > torch-cpu slot > GPU-less torch-cuda
+    degraded (only when there is no torch-cpu slot, activated in CPU mode).
     """
     cuda_candidates: list[tuple[Path, str]] = [(CUDA_SLOT, "dependencies/runtime/torch-cuda")]
     if not is_frozen() and DEV_VENV_SITE.is_dir():
         cuda_candidates.append((DEV_VENV_SITE, "dependencies/venv"))
 
-    degraded: tuple[Path, str] | None = None  # CUDA 槽存在但无 GPU 的降级候选
+    degraded: tuple[Path, str] | None = None  # degraded candidate: CUDA slot present but no GPU
     if forced in ("auto", "cuda"):
         for root, label in cuda_candidates:
             if not root.is_dir():
-                continue  # 未外挂，属正常状态，不告警
+                continue  # not attached, normal state, no warning
             if not _is_complete(root):
                 log.record(
                     "warn",
@@ -173,7 +183,8 @@ def _select(forced: str) -> tuple[str, Path | None, str]:
             devices = _cuda_device_count(root)
             if devices > 0:
                 return "cuda", root, label
-            # 无 GPU：不跳过，暂存为降级候选（无 torch-cpu 槽时以 CPU 模式激活）
+            # No GPU: don't skip, keep as degraded candidate (activated in CPU
+            # mode when there is no torch-cpu slot)
             log.record(
                 "warn",
                 f"torch_runtime: {label} 未探测到可用 GPU（设备数={devices}）",
@@ -204,7 +215,7 @@ def _select(forced: str) -> tuple[str, Path | None, str]:
 
 
 def setup() -> str:
-    """执行运行时选择（幂等）。返回 'cuda' / 'cpu' / 'system'。"""
+    """Perform runtime selection (idempotent). Returns 'cuda' / 'cpu' / 'system'."""
     import time
 
     global _state
@@ -213,8 +224,9 @@ def setup() -> str:
     _t0 = time.perf_counter()
 
     if "torch" in sys.modules:
-        # 说明本模块被 import 得太晚（应有 APP.py 顶部导入保证顺序），
-        # finder 无法替换已加载的 torch，仅记录便于排查。
+        # Indicates this module was imported too late (APP.py imports it first to
+        # guarantee ordering); the finder cannot replace an already-loaded torch,
+        # so only log it for troubleshooting.
         log.record(
             "warn",
             "torch_runtime: torch 已在本模块之前导入，运行时选择无法替换已加载实例",
@@ -245,23 +257,23 @@ def setup() -> str:
     return _state["kind"]
 
 
-# ---------------------------------------------------------------- 查询接口
+# ── Query interface ──
 
 
 def runtime_kind() -> str:
-    """当前选择的运行时：'cuda' / 'cpu' / 'system'。"""
+    """The currently selected runtime: 'cuda' / 'cpu' / 'system'."""
     setup()
     return _state["kind"]
 
 
 def runtime_root() -> Path | None:
-    """外部运行时根目录；system 模式为 None。"""
+    """External runtime root directory; None in system mode."""
     setup()
     return _state["root"]
 
 
 def describe() -> str:
-    """人类可读的运行时描述（供服务启动日志）。"""
+    """Human-readable runtime description (for service startup logs)."""
     setup()
     if _state["kind"] == "system":
         return "system"
@@ -269,7 +281,7 @@ def describe() -> str:
 
 
 def ensure_available() -> str:
-    """在重服务启动前调用：确认 torch 可被找到，否则抛带安装指引的错误。"""
+    """Call before starting heavy services: confirm torch can be found, otherwise raise an error with install instructions."""
     setup()
     spec = importlib.util.find_spec("torch")
     if spec is None:
@@ -282,5 +294,6 @@ def ensure_available() -> str:
     return describe()
 
 
-# 模块导入即完成选择（须在 APP.py 顶部、任何 import core/flet 之前导入）。
+# Module import completes selection (must be imported at the top of APP.py, before
+# any import core/flet).
 setup()

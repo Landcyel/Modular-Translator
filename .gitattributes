@@ -1,0 +1,14 @@
+# Normalize line endings to LF in the repository; use native on checkout.
+* text=auto
+
+# Source files: always LF in the repo.
+*.py text eol=lf
+*.json text eol=lf
+*.ini text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+
+# Binary assets: never touch.
+*.ico binary
+*.png binary
+*.wav binary

@@ -2,10 +2,10 @@
 
 必须使用项目 .venv 的 Python 运行（解释器锁定，防止全局 Python 混入旧版依赖）：
 
-  .venv\\Scripts\\python.exe tools/build/build_cuda.py                  # 默认输出 D:\\ModularTranslator_cuda
-  .venv\\Scripts\\python.exe tools/build/build_cuda.py --verify --smoke
-  .venv\\Scripts\\python.exe tools/build/build_cuda.py --with-cpu-fallback   # 额外带回 torch-cpu 回退
-  .venv\\Scripts\\python.exe tools/build/build_cuda.py --with-whisper-cuda  # 额外打入 fasterwisper-cuda DLL
+  .venv\\Scripts\\python.exe build/build_cuda.py                  # 默认输出 D:\\ModularTranslator_cuda
+  .venv\\Scripts\\python.exe build/build_cuda.py --verify --smoke
+  .venv\\Scripts\\python.exe build/build_cuda.py --with-cpu-fallback   # 额外带回 torch-cpu 回退
+  .venv\\Scripts\\python.exe build/build_cuda.py --with-whisper-cuda  # 额外打入 fasterwisper-cuda DLL
 
 CUDA 版内容：torch-cuda 运行时（默认唯一 torch 槽位，无 GPU 时自动降级为 CPU
 模式运行，见 app/torch_runtime.py）+ llama-release 完整版（CPU+CUDA）；

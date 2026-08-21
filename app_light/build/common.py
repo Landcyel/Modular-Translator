@@ -1,6 +1,6 @@
 """Modular Translator 打包共享逻辑（CPU/CUDA 双版本共用，v3）。
 
-本模块由 tools/build/build_cpu.py 与 tools/build/build_cuda.py 共同调用，
+本模块由 build/build_cpu.py 与 build/build_cuda.py 共同调用，
 实现 PyInstaller onedir 绿色目录打包的完整流程（构建 -> 资源拷贝 -> 校验 -> 冒烟）。
 
 相对旧版 build_package.py 的关键修正（基于打包产物运行日志实证的导入错误）：
@@ -32,8 +32,16 @@ from pathlib import Path
 # 路径常量
 # ---------------------------------------------------------------------------
 
-# tools/build/common.py -> 项目根
-ROOT = Path(__file__).resolve().parent.parent.parent
+# build/common.py -> 项目根（脚本目录不固定：app_light/build/ 或分支根 build/）
+# 从脚本所在目录向上找第一个同时含 configs/ 与 APP.py 的应用根
+def _find_app_root(start: Path) -> Path:
+    for cand in (start, *start.parents):
+        if (cand / "configs").is_dir() and (cand / "APP.py").is_file():
+            return cand
+    raise RuntimeError(f"无法定位项目根（未找到含 configs/ 与 APP.py 的目录）: {start}")
+
+
+ROOT = _find_app_root(Path(__file__).resolve().parent)
 BUILD_ASSETS = ROOT / "build_assets"
 ENGINE_ZIP = BUILD_ASSETS / "flet-windows.zip"
 APP_ENTRY = ROOT / "APP.py"
@@ -191,7 +199,7 @@ def require_project_venv() -> None:
         sys.exit(
             "[错误] 必须使用项目 .venv 的 Python 运行构建脚本。\n"
             f"  当前解释器: {exe}\n"
-            f"  正确用法: {VENV_PYTHON} tools/build/build_cpu.py\n"
+            f"  正确用法: {VENV_PYTHON} build/build_cpu.py\n"
             "  使用全局 Python 会把旧版依赖混入产物，导致运行时 DLL 加载失败。"
         )
     if not (PROJECT_VENV / "Lib" / "site-packages" / "PyInstaller").is_dir():

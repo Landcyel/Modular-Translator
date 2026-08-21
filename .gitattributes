@@ -11,4 +11,6 @@
 # Binary assets: never touch.
 *.ico binary
 *.png binary
+*.jpg binary
+*.jpeg binary
 *.wav binary

@@ -280,12 +280,6 @@ python APP.py
 
 ---
 
-## 状态说明
-
-核心后端（翻译 / 转写 / 语音合成）均已实现并可用；翻译页已通过 UI-sink 完成接线（后端切换、文件选择、服务启停、文本提交/入队、状态推送均可用），仅遗留两个旧式回调（`_on_service_change`/`_on_task_change`）为空占位，不影响功能。
-
----
-
 ## 第三方许可与致谢
 
 - [GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)（MIT）— 内嵌语音合成引擎

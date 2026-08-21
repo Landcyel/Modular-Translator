@@ -1,19 +1,22 @@
-"""Translate workbench page — UI building kept; functional implementation removed (rebuild pending).
+"""Translate workbench page — Llama/API dual-backend translation UI, sink-wired.
 
-Kept:
-- build()'s three-row layout and all controls (visual structure unchanged)
-- save_ui_state() / refresh() (layout.py navigation contract)
-- build_translate() compatibility wrapper
+Layout:
+- Three-row workbench: input area (text/file batch) → args/config pickers → task queue panel.
+- Backend selection: top Switch toggles Llama (local llama-server, default) vs API (OpenAI-compatible);
+  the selected backend doubles as the service unit name ('llama'/'api'), see _on_backend_switch.
+- Service start/stop: _start_service/_stop_service call facade.start_service/stop_service via a
+  thread pool (llama launch / model load are blocking) and refresh button state.
 
-Removed: register_callbacks() and the remaining service/task/submit/queue/callback
-implementations (_start_service/_stop_service/_submit_translation/_update_service_status/
-_on_clear/_on_pause_toggle/_refresh_tasks/_on_service_change/_on_task_change are all
-placeholders; only their signatures remain for build()'s control callback bindings,
-method bodies are empty — button clicks doing nothing is expected behavior).
-Restored: backend selection (_on_backend_switch/_set_backend_style, an Llama/API
-two-way Switch, styled like the completed page's auto-export switch) and file selection
-(_pick_file, including text-format validation).
-Original implementation in ui/pages/translate.py.bak.
+Functional paths:
+- File selection (_pick_file): AlertDialog picking files (multi-select) or a folder, with text-format validation.
+- Text submission (_submit_translation): packages input via build_translation_requests (text → temp/*.txt,
+  Path → direct, list[Path] → one task per file), then enqueues via _enqueue_requests.
+- Enqueue (_enqueue_requests): facade.submit_task when wired (queue display driven by the core push),
+  otherwise local-cache + manual rebuild fallback.
+- Status/tasks push: registered through facade.register_ui_sink(current_backend, _sink) → update_service_status /
+  update_tasks (re-registered on backend switch).
+
+Legacy: _on_service_change/_on_task_change remain as empty compatibility stubs (superseded by the sink push).
 """
 
 import flet as ft

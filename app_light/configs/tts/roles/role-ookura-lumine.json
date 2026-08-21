@@ -1,0 +1,8 @@
+{
+    "mode": "default",
+    "version": "v2ProPlus",
+    "t2s_weights_path": "characters/ookura_lumine[v2ProPlus]/ookura_lumine-e30.ckpt",
+    "vits_weights_path": "characters/ookura_lumine[v2ProPlus]/ookura_lumine_e8_s520.pth",
+    "role_ref_audio": "characters/ookura_lumine[v2ProPlus]/[normal1]助けてって言われても、服飾部門の受験者を集めてもらわないと、.wav",
+    "prompt_text": "[normal1]助けてって言われても、服飾部門の受験者を集めてもらわないと、"
+}

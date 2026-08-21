@@ -1,0 +1,23 @@
+{
+  "name": "sakura_glossary",
+  "format": {
+    "with_info": "{src}->{dst} #{info}",
+    "without_info": "{src}->{dst}",
+    "separator": "\n"
+  },
+  "entries": [
+    {
+      "src": "悠真",
+      "dst": "悠真",
+      "info":"人名"
+    },
+    {
+      "src": "先輩",
+      "dst": "学姐"
+    },
+    {
+      "src": "魔導書",
+      "dst": "魔导书"
+    }
+  ]
+}

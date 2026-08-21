@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────
+# 仓库根 .gitignore — ModularTranslator
+# app_light/ 内部规则见 app_light/.gitignore（文档/笔记/API 密钥等）
+# ─────────────────────────────────────────────
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 压缩包/备份
+*.rar
+*.zip
+*.bak
+
+# 依赖/模型/运行时（GB 级，不入库，需单独分发）
+# 注意: app_light/dependencies 与 app_light/characters 是指向根级的
+# junction；无斜杠前缀的目录模式同时覆盖根级与 app_light 级，
+# 防止 git 跟随 junction 把 15GB+ 拉进索引
+dependencies/
+characters/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 双版本物理副本（app_workflow / app_lite）——时点快照，
+# 内容由 git 分支导出刷新；不入库（权威版本源 = git 分支）
+app_workflow/
+app_lite/
+
+# 打包产物与中间文件（/build/ 锚定根级，保留 app_light/tools/build/ 脚本）
+/build/
+dist/
+build_assets/
+*.spec
+
+# 生成物、日志与临时文件
+/app.log
+output/
+temp/
+logs/
+test_data/
+
+# 工具工作目录
+.zcode/
+
+# IDE / 系统
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store

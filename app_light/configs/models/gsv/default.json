@@ -1,0 +1,6 @@
+{
+    "device": "auto",
+    "bert_base_path": "dependencies/models/v4/chinese-roberta-wwm-ext-large",
+    "cnhuhbert_base_path": "dependencies/models/v4/chinese-hubert-base",
+    "sv_path": "dependencies/models/gsv/sv/pretrained_eres2netv2w24s4ep4.ckpt"
+}

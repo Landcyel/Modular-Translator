@@ -1,0 +1,8 @@
+{
+    "mode": "default",
+    "version": "v2ProPlus",
+    "t2s_weights_path": "characters/白[v2Proplus]/shiro-e15.ckpt",
+    "vits_weights_path": "characters/白[v2Proplus]/shiro_e8_s144.pth",
+    "role_ref_audio": "characters/白[v2Proplus]/reference_audios/日语/emotions/【默认】たぶん、したくてもできない。.wav",
+    "prompt_text": "【默认】たぶん、したくてもできない。"
+}

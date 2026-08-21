@@ -1,0 +1,12 @@
+{
+    "llama_path": "dependencies/llama-release",
+    "server_arg": {
+        "-m": "dependencies/models/sakura/sakura-7b-qwen2.5-v1.0-iq4xs.gguf",
+        "--host": "127.0.0.1",
+        "--port": "8080",
+        "-ngl": "auto",
+        "-c":"1024",
+        "--keep":"-1",
+        "-n":"-1"
+    }
+}

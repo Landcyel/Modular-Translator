@@ -1,0 +1,76 @@
+# ============================================================
+# ModularTranslator 运行依赖清单（app_lite / app_workflow 通用）
+#
+# 策略：直接依赖固定版本（版本取自源仓库 .venv 实测），传递依赖由 pip 自动解析。
+# 来源：源码 import 扫描（app/core/ui 非 vendor）+ dependencies/requirements/*.txt
+#       + PACKAGING.md §6.1 + install-gsv.sh
+#
+# 特殊项（不可直接 pip install -r 安装，见文末说明）：
+#   - torch / torchaudio   （需 --index-url 指定 CPU 或 cu128 变体）
+#   - moss-transcribe-diarize（本地源码包，位于 dependencies/MOSS-Transcribe-Diarize）
+# ============================================================
+
+# ---- 应用框架 / 运行时 ----
+flet==0.86.2                # UI 框架
+flet-desktop==0.86.2        # 桌面运行引擎（flet 桌面版必需）
+loguru==0.7.3               # 日志（app/log.py）
+requests==2.34.2            # MOSS 子进程/网络（core/moss/moss_subprocess.py）
+
+# ---- 推理核心 ----
+numpy==2.5.2                # core/gsv/engine.py
+transformers==5.15.0        # MOSS streamer（core/moss/streaming_runner.py）
+faster-whisper==1.2.1       # 转写引擎（core/executor 链；onnxruntime VAD 由其自动带入）
+soundfile==0.14.0           # GSV 参考音频时长预校验
+openai==3.1.0               # 翻译后端（openai 兼容 API）
+
+# ---- GSV 引擎核心（dependencies/requirements/gsv-core.txt）----
+ffmpeg-python==0.2.0
+librosa==1.0.0
+PyYAML==6.0.3
+tqdm==4.70.0
+matplotlib==3.11.1          # AR/modules/lr_schedulers.py 硬依赖
+
+# ---- GSV 模型层（dependencies/requirements/gsv-model.txt）----
+peft==0.20.0
+pytorch-lightning==2.6.5
+x-transformers==2.25.5      # f5_tts DiT 依赖链（x_transformers → einx → einops）
+
+# ---- GSV 文本/G2P（dependencies/requirements/gsv-text.txt）----
+jieba==0.42.1
+jieba-fast==0.53
+cn2an==0.5.24
+pypinyin==0.55.0
+opencc-python-reimplemented==0.1.7
+fast-langdetect==1.0.1
+split-lang==2.1.1
+g2p-en==2.1.0
+pyopenjtalk==0.4.1         # 日语 G2P
+wordsegment                # 英语 G2P 分词（当前 .venv 未安装，遇 [normal1] 标记文本才需要）
+
+# ---- 其他 ----
+nltk==3.10.3                # g2p_en 依赖 + core/gsv/setup_nltk_data.py
+# nltk 数据（英语 G2P 必需；zh/ja 可跳过）：
+#   python -m core.gsv.setup_nltk_data
+
+# ============================================================
+# 特殊安装项（不能直接 pip install -r 安装）
+# ============================================================
+
+# 1) torch / torchaudio —— 需按硬件选择变体：
+#    CPU 版（无 GPU 机器）：
+#      pip install torch==2.11.0+cpu torchaudio==2.11.0+cpu \
+#        --index-url https://download.pytorch.org/whl/cpu
+#    GPU cu128 版（NVIDIA + CUDA 12.8）：
+#      pip install torch==2.11.0+cu128 torchaudio==2.11.0+cu128 \
+#        --index-url https://download.pytorch.org/whl/cu128
+#    GPU cu128 版 —— 阿里云镜像源（国内加速；注意必须用 --find-links 而非 --index-url：
+#    该镜像是 flat 文件列表，非 PEP 503 索引，--index-url 会报 versions: none。
+#    已验证包含 torch-2.11.0+cu128-cp314-cp314-win_amd64.whl）：
+#      pip install torch==2.11.0+cu128 torchaudio==2.11.0+cu128 \
+#        --find-links https://mirrors.aliyun.com/pytorch-wheels/cu128
+#    运行时由 app/torch_runtime.py 自动选择（探测 GPU → CUDA，否则 CPU）。
+
+# 2) moss-transcribe-diarize==0.1.0 —— 本地源码包（不在 PyPI）：
+#      pip install -e dependencies/MOSS-Transcribe-Diarize
+#    （或 cd 到该目录后 pip install -e .；其传递依赖 av/fastapi/librosa/numba/
+#     safetensors/soxr/uvicorn 等由 pip 自动解析）

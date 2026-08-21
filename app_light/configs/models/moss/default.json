@@ -1,0 +1,19 @@
+{
+  "model_path": "dependencies/models/moss",
+  "device": "auto",
+  "dtype": "bf16",
+  "lazy_load": false,
+  "decoding": "greedy",
+  "prompt": "请将音频转写为文本，每一段需以起始时间戳和说话人编号（[S01]、[S02]…）开头，正文为对应的语音内容，并在段末标注结束时间戳，以清晰标明该段语音范围。",
+  "max_new_tokens": 65536,
+  "max_len": 131072,
+  "single_speaker": true,
+  "max_audio_sec": 300,
+  "overlap_sec": 10,
+  "vram_auto_fit": true,
+  "vram_safety_ratio": 0.85,
+  "min_window_sec": 60,
+  "silence_boundary": true,
+  "silence_min_sec": 0.35,
+  "boundary_lookback_sec": 30
+}

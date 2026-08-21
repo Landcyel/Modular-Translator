@@ -1,0 +1,14 @@
+{
+    "max_new_tokens": 65536,
+    "max_len": 131072,
+    "decoding": "greedy",
+    "single_speaker": true,
+    "max_audio_sec": 300,
+    "overlap_sec": 10,
+    "vram_auto_fit": true,
+    "vram_safety_ratio": 0.85,
+    "min_window_sec": 60,
+    "silence_boundary": true,
+    "silence_min_sec": 0.35,
+    "boundary_lookback_sec": 30
+}

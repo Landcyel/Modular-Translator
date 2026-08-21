@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# 压缩包/备份
+*.rar
+*.zip
+*.bak
+
+# 依赖/模型/运行时（GB 级，不纳入版本控制，需单独分发）
+dependencies/
+
+# 打包产物与中间文件（PyInstaller；/build/ 仅忽略根目录构建产物，保留 tools/build/ 打包脚本）
+/build/
+dist/
+build_assets/
+*.spec
+
+# 生成物与临时文件
+output/
+temp/
+
+# 本地配置（含真实 API 密钥，不提交；模板为 default.example.json）
+configs/models/API/default.json
+
+# 仅跟踪 configs/ core/ ui/ app/ APP.py（及 pytest.ini），以下为本地文档/测试数据/临时内容
+# 测试目录：仅 tests/core 与 tests/app 下的用例代码入库；素材/产物/脚本式端到端测试不入库
+tests/data/
+tests/output/
+tests/scripts/
+archived/
+PLANS/
+summary/
+idea/
+*.md
+reasonix.toml
+
+# IDE
+.idea/
+.vscode/
+
+# 系统
+Thumbs.db
+.DS_Store
+
+# 本地工具状态与运行时日志
+.reasonix/
+logs/
+characters/
+test_data/
+
+# 双版本物理副本（app_workflow / app_lite）——时点快照，由 tools/sync_version_dirs.py
+# 从 git 分支重新导出刷新；不纳入版本控制（权威版本源 = git 分支）
+app_workflow/
+app_lite/

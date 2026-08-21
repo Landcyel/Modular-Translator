@@ -1,0 +1,8 @@
+{
+    "mode": "default",
+    "version": "v2ProPlus",
+    "t2s_weights_path": "characters/est_gealach_arnotts[v2ProPlus]/est_gealach_arnotts-e32.ckpt",
+    "vits_weights_path": "characters/est_gealach_arnotts[v2ProPlus]/est_gealach_arnotts_e16_s1344.pth",
+    "role_ref_audio": "characters/est_gealach_arnotts[v2ProPlus]/[normal]あなたを気に入ったことも理由の一つだし、助けてもらったお礼もあるから。.wav",
+    "prompt_text": "[normal]あなたを気に入ったことも理由の一つだし、助けてもらったお礼もあるから。"
+}

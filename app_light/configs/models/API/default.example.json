@@ -1,0 +1,7 @@
+{
+    "_comment": "复制此文件为 default.json 并填入你的 API Key",
+    "base_url": "https://api.deepseek.com",
+    "api_key": "YOUR_API_KEY_HERE",
+    "model": "deepseek-v4-pro",
+    "timeout": 120
+}

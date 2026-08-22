@@ -645,7 +645,7 @@ GLOSSARY = ConfigType(
     validate_fn=_glossary_validate,
 )
 
-# ── Rules file (aligned with core/rule_splitter.py: prefix/suffix/placeholder/skip/recognize) ──
+# ── Rules file (aligned with core/rule_splitter.py: prefix/suffix/ps_pair/placeholder/recognize/skip/region) ──
 
 _RULES_FIELDS = [
     Field("prefix", "前缀 (JSON 数组)", type="list",
@@ -654,16 +654,22 @@ _RULES_FIELDS = [
     Field("suffix", "后缀 (JSON 数组)", type="list",
           default='[\n  "」",\n  "』"\n]',
           description="用于识别段落/行的结束模式（数组）"),
+    Field("ps_pair", "成对 prefix-suffix (JSON 数组)", type="list",
+          default='[\n  {"open": "「", "close": "」"}\n]',
+          description="每项 {open, close}，open/close 可为字面量或 {\"literal\"}/{\"regex\"}；成对结构识别（成对优先）"),
     Field("placeholder", "占位符 (JSON 二维数组)", type="list",
           default='[\n  ["%CALLNAME:MASTER%", "<<<MASTER>>>"],\n  ["%CALLNAME:TARGET%", "<<<TARGET>>>"]\n]',
-          description="每项为 [原文匹配, 替换文本]，用于保护不可变标记"),
+          description="每项为 [原文匹配, 替换文本]，用于保护不可变标记；跨行匹配按行片段发标记（序号在 <<<>>> 内）"),
     Field("recognize", "识别条目 (JSON 数组)", type="list", default="[]",
           description="可选：额外识别条目列表"),
     Field("skip", "跳过条目 (JSON 数组)", type="list", default="[]",
           description="可选：跳过不翻译的条目列表"),
+    Field("region", "跨行区域 (JSON 数组)", type="list",
+          default='[\n  {"label": {"open": "{", "close": "}"}, "concat": []}\n]',
+          description="每项 {label:{open,close}, concat:[...]}；label 为跨行符号对（开/闭行不入内容），concat 为行尾续行符（补充）；包裹部分按虚拟行应用规则后分行回物理行"),
 ]
 
-_RULES_LIST_KEYS = ("prefix", "suffix", "placeholder", "recognize", "skip")
+_RULES_LIST_KEYS = ("prefix", "suffix", "ps_pair", "placeholder", "recognize", "skip", "region")
 
 
 def _rules_build(values: dict) -> dict:

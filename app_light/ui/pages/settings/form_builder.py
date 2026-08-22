@@ -136,6 +136,19 @@ def _build_field(field: Field, refs: dict, errors: list,
             init_val = opts[0].key if opts else None
         dd = ft.Dropdown(value=init_val, options=opts, data=field.key,
                          on_select=on_change, **common)
+        if field.scan_config_type:
+            # 点开下拉时重新扫描配置目录：新增/删除配置文件即时可见，无需重建表单
+            def _refresh(_e=None, _dd=dd, _field=field):
+                fresh = [_mk_option(o) for o in _field.options]
+                if _field.options_provider:
+                    fresh += [_mk_option(o) for o in _field.options_provider()]
+                fresh += [_option_for(p.name) for p in _scan_config_dir(
+                    _field.scan_config_type, getattr(_field, "scan_glob", "*.json"))]
+                _dd.options = fresh
+                if _dd.value and _dd.value not in [o.key for o in fresh]:
+                    _dd.value = fresh[0].key if fresh else None  # 所选文件已删除 → 回退首个
+                _dd.update()
+            dd.on_focus = _refresh
         refs[field.key] = dd
         return _field_row(field, [dd] + err_widgets, center=True)
 

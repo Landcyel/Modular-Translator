@@ -1,0 +1,24 @@
+{
+    "description": "吉里吉里(KAG) ERB 脚本规则 — 仅翻译引擎输出的对话文本（PRINTFORM*/HTMLPRINTW/FADE/PRINT_KOJO_COLORW 等显示指令内的「」/『』），脚本注释/控制流/标签/非显示 CALL 行自动透传；\\@...\\@ 条件表达式与 %...% 内嵌调用原样保护",
+    "recognize": [
+        {"regex": "^[ \\t]*\\bPRINT(?:FORMW|FORMDW|FORMDL|FORML|FORM|DL|D|L)?\\b"},
+        {"regex": "^[ \\t]*CALL HTMLPRINT(?:W|DW|DL)\\b"},
+        {"regex": "^[ \\t]*CALL (?:FADEOUT|FADEIN|FADE|FPRINTW|FPRINTL|PRINT_KOJO_COLORW)\\([^\"「『]*[\"「『]"}
+    ],
+    "prefix": [
+        {"regex": "^[ \\t]*(?:PRINTFORMDW|PRINTFORMDL|PRINTFORMW|PRINTFORML|PRINTDL|PRINTD|PRINTFORM|PRINTL|PRINT)\\b[ \\t　]*(?:「)?"},
+        {"regex": "^[ \\t]*CALL HTMLPRINT(?:DW|DL|W)\\(@?\"?(?:「)?"},
+        {"regex": "^[ \\t]*CALL (?:FADEOUT|FADEIN|FADE|FPRINTW|FPRINTL|PRINT_KOJO_COLORW)\\([^\"「『]*[\"「『]+"}
+    ],
+    "suffix": [
+        {"regex": "[」』]\"[^)\\n]*\\)"},
+        {"regex": "[」』]\"?\\)"},
+        {"regex": "[」』]"}
+    ],
+    "placeholder": [
+        [{"regex": "\\\\@.*?\\\\@"}, "<<<AT>>>"],
+        [{"regex": "\\\\@(?![^\\\\@]*\\\\@)"}, "<<<AT>>>"],
+        [{"regex": "%[^%\\n]*?%"}, "<<<PCT>>>"]
+    ],
+    "skip": []
+}
